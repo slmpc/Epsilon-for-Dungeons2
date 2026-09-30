@@ -1,22 +1,46 @@
-# ---- Python ----
+# ============================================================================
+#  MCD2 热注入框架 / 分析工作区
+# ============================================================================
+
+# ---- 构建产物 ----
+build/
+out/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+!scripts/**
+*.log
+
+# ---- vcpkg(依赖由 vcpkg.json 声明, 装出来的东西不入库) ----
+vcpkg_installed/
+.vcpkg-root
+
+# ---- Python(analysis/ 下的脚本) ----
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-build/
 dist/
 .venv/
 venv/
 env/
 
-# ---- 分析产物（脚本运行时会落盘的日志/转储，不入库） ----
+# ---- 分析产物(脚本运行时会落盘的日志/转储) ----
 *_log.txt
 *.dmp
 *.dump
 *.bin.tmp
 
+# ---- 编译器数据库(由 CMake 生成) ----
+compile_commands.json
+
 # ---- 编辑器 / 系统 ----
 .idea/
+.vs/
 .vscode/
 *.swp
 *~

@@ -104,7 +104,19 @@ std::string NamePool::resolve_uncached(int32_t index) const {
         return {};
     if (block == 0) return {};
 
-    auto e = read_entry(block + offset);
+    // ⚠️ 偏移量是**除以 2** 存的, 不是字节偏移。
+    //
+    // 条目按 2 字节对齐, 所以 UE 把字节偏移右移一位塞进 16 位字段, 换出一位
+    // 额外的寻址范围。读的时候要乘以 2 还原。
+    //
+    // 这一点必须实测确认, 凭"索引就是字节偏移"的直觉写会得到**完全错误但
+    // 看起来像有数据**的结果 —— 索引会落在某个条目中间, 解出的"名字"是
+    // 别扭的 UTF-16 乱码, 而地址、布局、校验全都正常, 极难定位。
+    //
+    // 实测依据(两个独立样本, 都精确落在条目边界上):
+    //   索引 0x6EB × 2 = 0xDD6 → F6 04 + "/Script/CoreUObject"(19 字符)
+    //   索引 0x20B × 2 = 0x416 → 80 01 + "Object"(6 字符)   ← UObject 的 CDO
+    auto e = read_entry(block + 2ull * offset);
     if (!e) return {};
     return e->text;
 }

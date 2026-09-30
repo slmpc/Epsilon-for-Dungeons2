@@ -75,4 +75,11 @@ Hooks& hooks();
 uint64_t present_address();
 uint64_t frame_count();
 
+// 游戏在用的那条 DIRECT 命令队列(由 ExecuteCommandLists 钩子捕获)。
+// 没捕获到返回 nullptr。
+//
+// 覆盖层**必须**用它渲染: D3D12 的 flip 模型交换链与创建它的队列绑定,
+// 在别的队列上渲染会导致"命令执行了、围栏也完成了、但画面不进入呈现结果"。
+void* present_queue();
+
 } // namespace mcd2::payload

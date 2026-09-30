@@ -34,6 +34,11 @@ if(MSVC)
         _CRT_SECURE_NO_WARNINGS
         NOMINMAX                 # 阻止 windows.h 定义 min/max 宏, 与 <algorithm> 冲突
         WIN32_LEAN_AND_MEAN
+        # 全项目只用 W 系列 API, 所以显式声明 Unicode。
+        # 少了这两个宏, IDC_ARROW 之类的 MAKEINTRESOURCE 会解析成 ANSI 版本,
+        # 传给 LoadCursorW 就会报 LPCWSTR 类型不匹配。
+        UNICODE
+        _UNICODE
         # 注意: 不要定义 WIN32_NO_STATUS —— 那会从 winnt.h 里抹掉
         # STATUS_WAIT_0 / STATUS_PENDING 等宏, 而 WaitForMultipleObjects 的
         # 返回值比较(WAIT_OBJECT_0)依赖它们。
@@ -51,23 +56,16 @@ foreach(_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${_cfg} "${CMAKE_BINARY_DIR}/bin")
 endforeach()
 
-# ---------------------------------------------------------------- 依赖: MinHook (vcpkg)
-# 通过 vcpkg manifest 模式管理, 依赖声明在 vcpkg.json 里。
+# ---------------------------------------------------------------- 依赖: MinHook + ImGui (vcpkg)
+# 依赖声明在 vcpkg.json 里(manifest 模式)。
 # 配置时必须带上工具链文件, 本仓库的 CMakePresets.json 已内置:
-#     cmake --preset vs2022-x64-release
-# 手动配置时:
-#     cmake -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-find_package(minhook CONFIG QUIET)
-
-if(NOT minhook_FOUND)
-    message(FATAL_ERROR
-        "找不到 MinHook。请用 vcpkg 安装后再配置:\n"
-        "    vcpkg install minhook:x64-windows-static\n"
-        "并确保配置时带上了 vcpkg 工具链文件(-DCMAKE_TOOLCHAIN_FILE=.../vcpkg.cmake)。\n"
-        "若已手动指定 MinHook 路径, 可用 -Dminhook_DIR=<...>/share/minhook。")
-endif()
+#     cmake --preset release
+# 或直接跑 .\scripts\build.ps1
+find_package(minhook CONFIG REQUIRED)
+find_package(imgui CONFIG REQUIRED)
 
 message(STATUS "MinHook: ${minhook_DIR}")
+message(STATUS "ImGui  : ${imgui_DIR}")
 
 # ---------------------------------------------------------------- 公共层
 add_library(mcd2_common STATIC
@@ -93,6 +91,7 @@ add_library(mcd2_payload SHARED
     src/payload/pipe_client.cpp
     src/payload/command_server.cpp
     src/payload/hooks.cpp
+    src/payload/overlay.cpp
     src/payload/ue/engine.cpp
     src/payload/ue/name_pool.cpp
     src/payload/ue/object_array.cpp
@@ -100,16 +99,15 @@ add_library(mcd2_payload SHARED
     src/payload/ue/world.cpp
 )
 target_include_directories(mcd2_payload PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/payload")
-# minhook 目标名: vcpkg 的 config 导出的 target 是 minhook::minhook;
-# 若上游只给了裸库名, 这里做一次兼容。
-if(TARGET minhook::minhook)
-    set(MCD2_MINHOOK_TARGET minhook::minhook)
-elseif(TARGET minhook)
-    set(MCD2_MINHOOK_TARGET minhook)
-else()
-    set(MCD2_MINHOOK_TARGET ${MINHOOK_LIBRARIES})
-endif()
-target_link_libraries(mcd2_payload PRIVATE mcd2_common ${MCD2_MINHOOK_TARGET})
+# dxgi / d3d12 是必须的: 我们自己的代码走 GetProcAddress, 但 ImGui 的 DX12
+# 后端(imgui_impl_dx12.cpp)直接调用了 CreateDXGIFactory1 等符号。
+target_link_libraries(mcd2_payload PRIVATE
+    mcd2_common
+    minhook::minhook
+    imgui::imgui
+    dxgi
+    d3d12
+)
 set_target_properties(mcd2_payload PROPERTIES
     OUTPUT_NAME "mcd2_payload"
     PREFIX ""
@@ -143,6 +141,13 @@ target_link_libraries(mcd2_testtarget PRIVATE mcd2_common)
 add_executable(d3d_probe EXCLUDE_FROM_ALL
     tests/d3d_probe/main.cpp
 )
+
+# d3d12_target: 真实出帧的 D3D12 窗口程序。
+# 没有游戏在跑时, 用它验证 Present 钩子与 ImGui 覆盖层。
+add_executable(d3d12_target EXCLUDE_FROM_ALL
+    tests/d3d12_target/main.cpp
+)
+target_link_libraries(d3d12_target PRIVATE mcd2_common d3d12 dxgi dxguid)
 
 # pipe_test: 把命名管道双向收发单独拎出来验证。
 # 注入链路里排查"某方向收不到消息"成本很高, 这个能直接定位是通道代码的

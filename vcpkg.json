@@ -1,13 +1,21 @@
 {
   "name": "mcd2-hotinject",
   "version": "0.1.0",
-  "description": "Minecraft Dungeons II 热注入框架: 远程线程注入器 + UE5 运行时反射数据采集",
+  "description": "Minecraft Dungeons II 热注入框架: 远程线程注入器 + UE5 运行时反射数据采集 + D3D12 覆盖层",
   "homepage": "https://github.com/OpenEpsilon/EpsilonForDungeons2",
   "license": "MIT",
   "dependencies": [
     {
       "name": "minhook",
       "platform": "windows & !uwp"
+    },
+    {
+      "name": "imgui",
+      "platform": "windows & !uwp",
+      "features": [
+        "dx12-binding",
+        "win32-binding"
+      ]
     }
   ],
   "builtin-baseline": "d87340acc46bdeda386037b38aca30136e667e47"

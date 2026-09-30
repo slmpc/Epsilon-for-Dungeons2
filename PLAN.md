@@ -12,8 +12,10 @@
 |---|---|---|---|
 | 1 | `build/release/bin/mcd2_injector.exe` | 选进程 → 建管道 → `CreateRemoteThread(LoadLibraryW)` 注入 → 等 ready → 下发命令 / 交互 shell | ✅ **已验证** |
 | 2 | `build/release/bin/mcd2_payload.dll` | 连管道 → 定位 GObjects/GNames → 重建属性偏移 → 响应命令 | ✅ **已验证** |
-| 3 | `build/release/bin/mcd2_testtarget.exe` | 无 D3D / 无 UE 的靶子，用于验证链路与优雅降级 | ✅ **已验证** |
-| 4 | 诊断工具 `d3d_probe` / `pipe_test` | 隔离验证 D3D 调用与管道双向收发 | ✅ 已完成 |
+| 3 | **D3D12 ImGui 覆盖层** | 挂钩 Present → 用游戏自己的命令队列渲染 ImGui 面板显示引擎/钩子/对象数据，Insert 开关 | ✅ **已验证（截图确认）** |
+| 4 | `build/release/bin/mcd2_testtarget.exe` | 无 D3D / 无 UE 的靶子，验证链路与优雅降级 | ✅ **已验证** |
+| 5 | `build/release/bin/d3d12_target.exe` | 真实出帧的 D3D12 窗口程序，用于验证 Present 钩子与覆盖层 | ✅ **已验证** |
+| 6 | 诊断工具 `d3d_probe` / `pipe_test` | 隔离验证 D3D 调用与管道双向收发 | ✅ 已完成 |
 
 ---
 
@@ -24,6 +26,8 @@
 | **只做注入** | 已删除 `eject_dll()`、`--eject`、`-e`。`proc_util.h` 里写明了为什么不提供卸载：注入体挂钩子/起线程后半途 `FreeLibrary` 会留下悬空回调，目标必崩 |
 | **单一方案，不做多路 fallback** | 见 §3「已删除的 fallback」——共砍掉 10 处多方案分支、2 个模块、约 470 行 |
 | **MinHook** | vcpkg manifest 依赖 `minhook 1.3.4`（`x64-windows-static`），注入体静态链接 |
+| **D3D12** | 全流程只走 D3D12：定位 Present 用临时 D3D12 设备；覆盖层用 `imgui_impl_dx12` + `imgui_impl_win32` |
+| **ImGui** | vcpkg `imgui 1.92.8`（features: `dx12-binding` + `win32-binding`）。**UI 文案一律英文** —— 内置字体只有 ASCII，混入中文会显示成 `?` |
 | **vcpkg** | `vcpkg.json` + `CMakePresets.json` 里的 toolchain 文件路径 |
 | **C++23 / MSVC** | `/std:c++latest`，MSVC 19.51.36256.0，`/W4` 下 **0 error 0 warning** |
 | **不要卸载 DLL** | 无 `FreeLibrary` 路径；`shutdown_runtime()` 只断管道 |
@@ -131,6 +135,10 @@ mcd2> quit     →  bye, 运行时停止
 | 7 | 同上 | `PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN` 实际有 12 个参数（`ppImmediateContext` 前还有一个 `D3D_FEATURE_LEVEL*`） | 补齐参数 |
 | 8 | 同上 | `present_from_temp_swapchain` 的析构器 `FreeLibrary` 掉了 `dxgi.dll` —— 而返回的 `Present` 地址就在里面，`MH_CreateHook` 写入已解除映射的内存 | 去掉 `FreeLibrary`，并在注释里写明为什么必须留着 |
 | 9 | 注入器收不到注入体任何消息（**最隐蔽**） | 存在**两个 `PipeClient` 实例**：`connect_injector_pipe()` 连的是 `pipe_client.cpp` 里的静态 `g_pipe`，而 `emit_now()` 往 `ctx().pipe` 发。后者从未连接，每次 `send` 都返回 false。症状极具误导性——注入器→注入体方向正常（命令能收到），反向全丢 | 统一到 `ctx().pipe` 单一实例，`ctx().pipe_connected` 记状态 |
+| 10 | Present 钩子一挂上，目标进程立刻死 | **根因是 D3D11**：为了取 vtable 去建了一个临时 D3D11 设备，而目标进程里没有可用的 D3D11 上下文，`D3D11CreateDeviceAndSwapChain` 直接把进程带走。改用 **D3D12** 原生建（`D3D12CreateDevice` → `CreateCommandQueue` → `CreateSwapChainForHwnd`）后彻底消失 | 全流程 D3D12；整段放进 SEH 抓异常码 |
+| 11 | 覆盖层"全部成功但屏幕上什么都没有" | **flip 模型交换链与创建它的队列绑定**。我们用自己的队列渲染：命令执行了、围栏完成了、日志全绿，但画面不进入呈现结果 | 挂钩 `ID3D12CommandQueue::ExecuteCommandLists` 捕获游戏队列，覆盖层改用它渲染 |
+| 12 | 同上，另一层 | Release 下 `IM_ASSERT` 是空操作，ImGui 后端在 PSO 创建失败时静默什么都不画 | 显式调 `ImGui_ImplDX12_CreateDeviceObjects()` 并检查返回值 |
+| 13 | `d3d12_target` 一启动就退（`hr=0x0` 但指针为 null） | 把"调用"和"检查出参"塞进同一个函数调用的实参里，MSVC 从右往左求值，出参在调用前就被读走 | 拆成两条语句 |
 
 **方法论**：第 5–9 条全部靠"可观测性"定位。注入体被塞进无控制台的进程，
 出问题只能看到"进程没了"。所以加了：
@@ -164,14 +172,39 @@ mcd2> quit     →  bye, 运行时停止
 3. **`vtable[8]` 是 `IDXGISwapChain::Present`**。索引 = `IUnknown`(3) +
    `IDXGIObject`(4，注意有 `GetPrivateData`) + `IDXGIDeviceSubObject`(1) = 8。
    已对着 SDK 的 `dxgi.h` 数过，并用 `d3d_probe` 运行时验证。
-4. **不要定义 `WIN32_NO_STATUS`**，它会抹掉 `STATUS_WAIT_0` / `STATUS_PENDING`。
-5. **窄字符串格式化里不能直接放 `wchar_t*`**，会触发 `std::format` 的
-   formatter 查找失败（C2039/C7595）。用 `to_utf8()`。
-6. **`WIN32_LEAN_AND_MEAN` 之后要显式 include** `<psapi.h>`（`MODULEINFO`）、
-   `<unknwn.h>`（`IUnknown`/`IID`）。
-7. **管道方向不对称时先怀疑对象错配**，不要怀疑内核。见 §5 第 9 条。
-8. **改代码前先关掉所有靶子进程**，否则 `mcd2_payload.dll` 被锁，
-   link 报 `LNK1104`。
+4. **`vtable[10]` 是 `ID3D12CommandQueue::ExecuteCommandLists`**。索引 =
+   `IUnknown`(3) + `ID3D12Object`(4) + `ID3D12DeviceChild`(1) +
+   `ID3D12Pageable`(0) + `UpdateTileMappings`/`CopyTileMappings`(2) = 10。
+5. **不要把"调用"和"检查出参"塞进同一个函数调用**。C++ 未规定实参求值顺序，
+   MSVC 从右往左 —— `check(CreateDevice(...), g_device, ...)` 里的 `g_device`
+   会在调用发生**之前**被读走，拿到永远是 null 的旧值。必须拆成两条语句。
+   （这个坑让我在 `d3d12_target` 上白排查了一轮。）
+6. **D3D12 的 flip 模型交换链与"创建它的那条队列"绑定**。在别的队列上渲染，
+   命令会执行、围栏会完成、日志全绿，**但画面不会进入呈现结果**。覆盖层因此
+   必须用游戏自己的队列 —— 靠挂钩 `ExecuteCommandLists` 捕获。
+7. **D3D12 的视口不会自动跟随渲染目标**，默认是全 0。虽然 ImGui 后端自己会
+   `RSSetViewports`，但自己写渲染代码时漏掉这一步的症状是"什么都没画出来"
+   且没有任何报错。
+8. **Release 构建里 `IM_ASSERT` 是空操作**。ImGui 后端在
+   `CreateDeviceObjects` 失败时只有一句 `IM_ASSERT(0 && ...)`，所以 PSO 建
+   不出来时会**静默什么都不画**。要显式调 `ImGui_ImplDX12_CreateDeviceObjects()`
+   并检查返回值。
+9. **`IDXGIFactory2` / `IDXGISwapChain1/3` / `DXGI_SWAP_CHAIN_DESC1` 不在
+   `dxgi.h` 里**，分别在 `dxgi1_2.h` / `dxgi1_4.h`。用 `dxgi1_6.h` 一次覆盖。
+10. **`imgui::imgui` 需要链接 `dxgi`**（`d3d12` 也一起）。我们自己的代码走
+    `GetProcAddress`，但 `imgui_impl_dx12.cpp` 直接调了 `CreateDXGIFactory1`，
+    不链接就 `LNK2019`。
+11. **`IDC_ARROW` 之类需要 `UNICODE` 宏**才解析成宽字符版本，否则传给
+    `LoadCursorW` 会报 `LPCWSTR` 类型不匹配。
+12. **不要定义 `WIN32_NO_STATUS`**，它会抹掉 `STATUS_WAIT_0` / `STATUS_PENDING`。
+13. **窄字符串格式化里不能直接放 `wchar_t*`**，会触发 `std::format` 的
+    formatter 查找失败（C2039/C7595）。用 `to_utf8()`。
+14. **`WIN32_LEAN_AND_MEAN` 之后要显式 include** `<psapi.h>`（`MODULEINFO`）、
+    `<unknwn.h>`（`IUnknown`/`IID`）。
+15. **管道方向不对称时先怀疑对象错配**，不要怀疑内核。
+16. **改代码前先关掉所有靶子进程**，否则 `mcd2_payload.dll` 被锁，
+    link 报 `LNK1104`。
+17. **ImGui 覆盖层的 UI 文案不要写中文** —— 内置字体只有 ASCII。
 
 ---
 

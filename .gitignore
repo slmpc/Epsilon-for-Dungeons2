@@ -1,0 +1,25 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ---- 分析产物（脚本运行时会落盘的日志/转储，不入库） ----
+*_log.txt
+*.dmp
+*.dump
+*.bin.tmp
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store

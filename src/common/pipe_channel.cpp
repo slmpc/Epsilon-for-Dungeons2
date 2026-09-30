@@ -25,6 +25,7 @@
 #  define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <process.h>   // _beginthreadex
 
 #include <atomic>
 #include <cstring>
@@ -119,7 +120,9 @@ std::wstring make_pipe_name(std::wstring_view prefix) {
 
 std::wstring default_pipe_name(uint32_t target_pid) {
     wchar_t buf[64]{};
-    ::swprintf_s(buf, L"MCD2HotInject.%u", target_pid);
+    // 前缀换过一次: 老名字 MCD2HotInject.<pid> 在真游戏上稳定拿到
+    // ACCESS_DENIED, 怀疑是名字层面的残留/冲突, 换个全新前缀排除这个变量。
+    ::swprintf_s(buf, L"MCD2HotPipe2.%u", target_pid);
     return buf;
 }
 
@@ -167,17 +170,20 @@ bool PipeServer::start(std::wstring const& pipe_name, MessageHandler on_message,
         return false;
     }
 
-    // 连接 + 读循环放进后台线程: ConnectNamedPipe 会阻塞, 不能占着调用方。
-    HANDLE t = ::CreateThread(nullptr, 0,
-                              reinterpret_cast<LPTHREAD_START_ROUTINE>(&acceptor_trampoline),
-                              this, 0, nullptr);
+    // 线程函数里会用到 CRT(std::string / std::format / std::mutex), 所以必须用
+    // _beginthreadex 而不是 CreateThread —— 后者不会为该线程初始化 CRT 的
+    // 线程级状态。在静态链接 CRT 的 DLL 里这一点尤其要命。
+    uintptr_t t = _beginthreadex(
+        nullptr, 0,
+        reinterpret_cast<unsigned(__stdcall*)(void*)>(&acceptor_trampoline),
+        this, 0, nullptr);
     if (!t) {
-        if (error) *error = fmt("CreateThread 失败 GetLastError={}", ::GetLastError());
+        if (error) *error = fmt("_beginthreadex 失败 errno={}", errno);
         close_handles();
         return false;
     }
-    ::SetThreadDescription(t, L"mcd2-pipe-acceptor");
-    acceptor_ = as_void(t);
+    ::SetThreadDescription(reinterpret_cast<HANDLE>(t), L"mcd2-pipe-acceptor");
+    acceptor_ = as_void(reinterpret_cast<HANDLE>(t));
     return true;
 }
 
@@ -355,12 +361,14 @@ unsigned long __stdcall PipeClient::reader_trampoline(void* self) {
 bool PipeClient::start_reader(std::function<void(proto::Kind, std::string_view)> on_message) {
     if (!pipe_) return false;
     on_message_ = std::move(on_message);
-    HANDLE t = ::CreateThread(nullptr, 0,
-                              reinterpret_cast<LPTHREAD_START_ROUTINE>(&reader_trampoline),
-                              this, 0, nullptr);
+    // 同上: 读线程里会构造 std::function / 派发命令行, 用 _beginthreadex。
+    uintptr_t t = _beginthreadex(
+        nullptr, 0,
+        reinterpret_cast<unsigned(__stdcall*)(void*)>(&reader_trampoline),
+        this, 0, nullptr);
     if (!t) return false;
-    ::SetThreadDescription(t, L"mcd2-pipe-reader");
-    reader_ = as_void(t);
+    ::SetThreadDescription(reinterpret_cast<HANDLE>(t), L"mcd2-pipe-reader");
+    reader_ = as_void(reinterpret_cast<HANDLE>(t));
     return true;
 }
 

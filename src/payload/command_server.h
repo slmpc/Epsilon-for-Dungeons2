@@ -42,6 +42,9 @@ private:
     void cmd_find(std::vector<std::string> const& args);
     void cmd_class(std::vector<std::string> const& args);
 
+    // ---- 原始内存 ----
+    void cmd_mem(std::vector<std::string> const& args);
+
     // ---- 属性/偏移 ----
     void cmd_props(std::vector<std::string> const& args);
     void cmd_get(std::vector<std::string> const& args);

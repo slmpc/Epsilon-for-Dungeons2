@@ -81,6 +81,16 @@ int main(int argc, char** argv) {
     set_color_enabled(!opt->no_color);
     ::SetConsoleCtrlHandler(&ctrl_handler, TRUE);
 
+    // --log: 让程序自己写文件。提权运行时这是唯一可靠的取回输出的方式 ——
+    // 提权启动的 shell 重定向在 UAC 之后常常静默失效。
+    if (!opt->log_path.empty()) {
+        if (log_open(opt->log_path)) {
+            out_line(fmt("  [*] 输出镜像到: {}", opt->log_path));
+        } else {
+            err_line(fmt("  [!] 无法打开日志文件: {}", opt->log_path));
+        }
+    }
+
     ui_banner();
 
     // ---------------------------------------------------------------- 列表模式

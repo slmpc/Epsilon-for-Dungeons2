@@ -44,8 +44,12 @@ public:
     // 判断某个 index 是否可以解析出合法名字。
     [[nodiscard]] bool probe(int32_t index) const;
 
-    // 统计前 n 个索引里有多少能解析出来 —— 用来给候选 blocks 地址打分。
-    [[nodiscard]] int score(int32_t max_index = 256) const;
+    // 从块 0 起始处顺序走条目链, 返回能连续解析出的条目数。
+    // 这是判定"候选地址是不是真的 FNamePool"的手段。
+    //
+    // 注意: 不能改成"按索引 0..N 采样" —— 索引是 (Block<<16)|ByteOffset,
+    // 相邻索引落在同一块里相差 1 字节的位置, 而不是相邻条目。
+    [[nodiscard]] int score(int32_t max_entries = 64) const;
 
 private:
     mutable std::vector<std::pair<int32_t, std::string>> cache_;

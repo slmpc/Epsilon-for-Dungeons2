@@ -24,6 +24,7 @@ struct Options {
     std::vector<std::string> commands;      // 注入后依次下发的命令
     uint32_t    wait_ready_ms = 20000;      // 等注入体报 ready 的上限
     bool        interactive = false;        // 是否进入交互式命令行
+    std::string log_path;                   // --log: 把输出同时写一份到文件
 };
 
 // 解析命令行。返回 nullopt 表示参数有误(错误已打印)。

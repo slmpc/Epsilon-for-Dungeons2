@@ -144,6 +144,7 @@ bool CommandServer::execute(std::string_view line) {
     else if (cmd == "get")                  { cmd_get(rest); }
     else if (cmd == "world" || cmd == "level") { cmd_world(); }
     else if (cmd == "actors" || cmd == "list") { cmd_actors(rest); }
+    else if (cmd == "mem" || cmd == "dump")    { cmd_mem(rest); }
     else if (cmd == "quit" || cmd == "exit" || cmd == "detach") {
         emit_line("bye");
         return false;
@@ -393,6 +394,55 @@ void CommandServer::cmd_get(std::vector<std::string> const& args) {
 }
 
 // ---------------------------------------------------------------------------
+void CommandServer::cmd_mem(std::vector<std::string> const& args) {
+    // 用法:
+    //   mem <rva十六进制> [len=N]     —— 相对模块基址(最常用)
+    //   mem va=<绝对地址> [len=N]
+    // 校准基线偏移时必须要有这个: "读数不对" 和 "地址不对" 光看 UObject
+    // 是分不清的, 得直接把原始字节打出来看。
+    if (args.empty()) {
+        emit_line("用法: mem <rva> [len=N]   或   mem va=<绝对地址> [len=N]");
+        return;
+    }
+
+    uint64_t addr = 0;
+    if (auto va = opt_value(args, "va")) {
+        try { addr = std::stoull(*va, nullptr, 0); } catch (...) {
+            emit_fmt("va 解析失败: {}", *va); return;
+        }
+    } else {
+        try { addr = eng_.module_base() + std::stoull(args[0], nullptr, 0); } catch (...) {
+            emit_fmt("rva 解析失败: {}", args[0]); return;
+        }
+    }
+
+    size_t len = 0x80;
+    if (auto l = opt_value(args, "len")) {
+        try { len = static_cast<size_t>(std::stoull(*l, nullptr, 0)); } catch (...) {}
+    }
+    if (len > 0x1000) len = 0x1000;
+
+    emit_fmt("=== 内存 {} ({} 字节) ===", hex(addr, 16), len);
+    std::vector<uint8_t> buf(len, 0);
+    if (!safe_read(buf.data(), reinterpret_cast<const void*>(addr), len)) {
+        emit_line("读取失败 —— 地址未映射或不可读");
+        return;
+    }
+    emit(hexdump(buf.data(), buf.size(), addr, buf.size()));
+
+    // 顺手把里面所有"像指针"的值列出来 —— 校准块表/虚表偏移时最有用。
+    emit_line("--- 疑似指针(8 字节对齐, 落在 0x10000..0x7FFFFFFFFFFF) ---");
+    int shown = 0;
+    for (size_t i = 0; i + 8 <= buf.size(); i += 8) {
+        uint64_t v = 0;
+        std::memcpy(&v, buf.data() + i, 8);
+        if (v < 0x10000 || v > 0x7FFFFFFFFFFFull) continue;
+        emit_fmt("  +{:#04x}  {}", i, hex(v, 16));
+        if (++shown >= 24) { emit_line("  ..."); break; }
+    }
+    if (shown == 0) emit_line("  (无)");
+}
+
 void CommandServer::cmd_world() {
     if (!eng_.ready()) { emit_line("引擎未定位, 先执行 rescan"); return; }
 

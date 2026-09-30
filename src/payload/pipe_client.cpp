@@ -45,7 +45,38 @@ bool connect_injector_pipe(uint32_t retry_ms, std::string* error) {
 
     std::string err;
     if (!c.pipe.connect(name, retry_ms, &err)) {
-        if (error) *error = fmt("连接管道 {} 失败: {}", to_utf8(name), err);
+        // 连不上就把管道子系统的状态一并报出来。对着真游戏排查时, 光一句
+        // "GetLastError=5" 完全不够 —— 分不清是"管道不存在/被占用", 还是
+        // "本进程被禁止创建/打开管道"。
+        const std::wstring full = pipe_full_path(name);
+        std::string diag = fmt("管道连接失败: {}; 目标={}", err, to_utf8(full));
+
+        // 1) 本进程能不能创建管道? 能创建就说明不是全局被禁, 问题在打开那一侧。
+        HANDLE srv = ::CreateNamedPipeW(
+            pipe_full_path(name + L".probe").c_str(),
+            PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 512, 512, 0, nullptr);
+        if (srv != INVALID_HANDLE_VALUE) {
+            diag += "; 本进程可创建管道=是";
+            ::CloseHandle(srv);
+        } else {
+            diag += fmt("; 本进程可创建管道=否(err={})", ::GetLastError());
+        }
+
+        // 2) 直接再打开一次, 单独记录错误码, 避免与重试逻辑的判定混淆。
+        HANDLE probe = ::CreateFileW(full.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                     0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (probe != INVALID_HANDLE_VALUE) {
+            diag += "; 二次打开=成功";
+            ::CloseHandle(probe);
+        } else {
+            const DWORD e = ::GetLastError();
+            diag += fmt("; 二次打开失败 err={}", e);
+            if (e == ERROR_ACCESS_DENIED)  diag += "(ACCESS_DENIED)";
+            if (e == ERROR_FILE_NOT_FOUND) diag += "(FILE_NOT_FOUND 管道不存在)";
+            if (e == ERROR_PIPE_BUSY)      diag += "(PIPE_BUSY 已被占用)";
+        }
+
+        if (error) *error = diag;
         return false;
     }
     c.pipe_connected = true;

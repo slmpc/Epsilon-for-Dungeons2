@@ -49,6 +49,9 @@ void print_usage() {
     out_line("  其它:");
     out_line("    -v, --verbose           打印更多过程信息");
     out_line("        --no-color          关闭彩色输出");
+    out_line("        --log <路径>        把输出同时写一份到文件");
+    out_line("                            (提权运行时最可靠 —— 提权启动的 shell");
+    out_line("                             重定向在 UAC 之后常常静默失效)");
     out_line("    -h, --help              显示本帮助");
     out_line("");
     out_line("  注入后进入交互模式时可直接输入命令, 例如:");
@@ -102,6 +105,9 @@ std::optional<Options> parse_args(int argc, char** argv) {
             auto v = need_value(a); if (!v) return std::nullopt;
             try { o.wait_ready_ms = static_cast<uint32_t>(std::stoul(*v)); }
             catch (...) { err_line("--wait 需要一个毫秒数"); return std::nullopt; }
+        }
+        else if (a == "--log") {
+            auto v = need_value(a); if (!v) return std::nullopt; o.log_path = *v;
         }
         else {
             err_line(fmt("未知参数: {}", a));

@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <psapi.h>      // GetModuleInformation / MODULEINFO
                         // (WIN32_LEAN_AND_MEAN 之后 windows.h 不再带入 psapi.h)
+#include <process.h>    // _beginthreadex
 
 #include <string>
 
@@ -21,13 +22,13 @@ namespace {
 
 HMODULE g_self = nullptr;
 
-std::wstring self_path() {
+std::wstring module_path_of(HMODULE m) {
     wchar_t buf[MAX_PATH * 4]{};
-    const DWORD n = ::GetModuleFileNameW(g_self, buf, static_cast<DWORD>(std::size(buf)));
+    const DWORD n = ::GetModuleFileNameW(m, buf, static_cast<DWORD>(std::size(buf)));
     return std::wstring(buf, n);
 }
 
-DWORD WINAPI start_thread(LPVOID) {
+unsigned __stdcall start_thread(void*) {
     mcd2::payload::runtime_main(nullptr);
     return 0;
 }
@@ -40,21 +41,37 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
             g_self = module;
             ::DisableThreadLibraryCalls(module);
 
-            // 把自己所在模块的基址/大小交给运行时 —— 后面所有扫描都基于它。
+            // ⚠️ 交给运行时的是**宿主进程主模块**(即游戏 EXE)的基址/大小,
+            //    不是我们自己这个 DLL 的。
+            //
+            //    基线 RVA(GObjects 0x0BEA8BF0 / GNames 0x0BDC5040 / ...)全部
+            //    是相对 Dungeons-Win64-Shipping.exe 的。之前这里传的是注入体
+            //    自己的模块, 于是候选地址被算成 "注入体基址 + RVA", 偏出去
+            //    几十 MB, 名字池校验必然 0/64 失败 —— 现象是"注入成功但引擎
+            //    永远定位不到"。
+            //
+            //    GetModuleHandleW(nullptr) 返回的就是进程主模块。
+            HMODULE host = ::GetModuleHandleW(nullptr);
             MODULEINFO mi{};
-            if (::GetModuleInformation(::GetCurrentProcess(), module, &mi, sizeof(mi))) {
+            if (host && ::GetModuleInformation(::GetCurrentProcess(), host, &mi, sizeof(mi))) {
                 mcd2::payload::set_module_info(
                     reinterpret_cast<uint64_t>(mi.lpBaseOfDll),
                     mi.SizeOfImage,
-                    self_path());
+                    module_path_of(host));
             } else {
-                mcd2::payload::set_module_info(reinterpret_cast<uint64_t>(module), 0, self_path());
+                mcd2::payload::set_module_info(reinterpret_cast<uint64_t>(host), 0,
+                                               module_path_of(host));
             }
 
             // 只创建线程, 不在加载锁里做任何重活。
-            HANDLE t = ::CreateThread(nullptr, 0, &start_thread, nullptr, 0, nullptr);
+            //
+            // 用 _beginthreadex 而不是 CreateThread: 这个线程会大量使用 CRT
+            // (std::string / std::format / std::mutex / std::function)。
+            // CreateThread 不初始化 CRT 的线程级状态, 在静态链接 CRT 的 DLL 里
+            // 会导致不可预测的崩溃 —— 而且是延迟发生的, 极难定位。
+            uintptr_t t = _beginthreadex(nullptr, 0, &start_thread, nullptr, 0, nullptr);
             if (t) {
-                ::CloseHandle(t);
+                ::CloseHandle(reinterpret_cast<HANDLE>(t));
             } else {
                 return FALSE;   // 线程都起不来, 宣告加载失败
             }

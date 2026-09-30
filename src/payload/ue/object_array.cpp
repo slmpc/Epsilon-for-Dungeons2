@@ -38,19 +38,30 @@ bool ObjectArray::refresh() {
     num_elements_ = max_elements_ = num_chunks_ = max_chunks_ = 0;
 
     if (!gobjects_) return false;
-    if (!safe_read(&objects_, reinterpret_cast<const void*>(gobjects_ + kOffObjectsPtr), 8))
-        return false;
-    if (!objects_) return false;
 
-    // TUObjectArray 自身也在目标堆上, 读它必须逐字段 safe_read。
-    if (!safe_read(&chunk_table_, reinterpret_cast<const void*>(objects_ + kOffChunkTable), 8))
+    // ⚠️ 布局要点: TUObjectArray 是**内嵌**在 FUObjectArray 里的(+0x10), 不是
+    //    再一层指针。所以块表就是 *(u64*)(GObjects + 0x10), 计数也在
+    //    GObjects 上直接读 —— 不要先解一层引用再 +0x10, 那会读到完全不相关
+    //    的地方, 现象是"读不到 FUObjectArray"。
+    //
+    //    真机实测(UE 5.6.1)在 GObjects 处的字节:
+    //        +0x10 块表指针        +0x20 MaxElements=2162688
+    //        +0x24 NumElements=149034  +0x28 MaxChunks=33  +0x2C NumChunks=3
+    //    149034/65536 向上取整 = 3, 2162688/65536 = 33 —— 完全自洽, 这就是
+    //    判定该布局正确的依据。
+    if (!safe_read(&chunk_table_, reinterpret_cast<const void*>(gobjects_ + kOffChunkTable), 8))
         return false;
-    safe_read(&max_elements_, reinterpret_cast<const void*>(objects_ + kOffMaxElements), 4);
-    safe_read(&num_elements_, reinterpret_cast<const void*>(objects_ + kOffNumElements), 4);
-    safe_read(&max_chunks_,   reinterpret_cast<const void*>(objects_ + kOffMaxChunks), 4);
-    safe_read(&num_chunks_,   reinterpret_cast<const void*>(objects_ + kOffNumChunks), 4);
+    if (!chunk_table_) return false;
 
-    return chunk_table_ != 0 && num_elements_ > 0;
+    safe_read(&max_elements_, reinterpret_cast<const void*>(gobjects_ + kOffMaxElements), 4);
+    safe_read(&num_elements_, reinterpret_cast<const void*>(gobjects_ + kOffNumElements), 4);
+    safe_read(&max_chunks_,   reinterpret_cast<const void*>(gobjects_ + kOffMaxChunks), 4);
+    safe_read(&num_chunks_,   reinterpret_cast<const void*>(gobjects_ + kOffNumChunks), 4);
+
+    // objects_ 只是给上层做显示用的"TUObjectArray 起始地址"。
+    objects_ = gobjects_ + kOffObjectsPtr;
+
+    return num_elements_ > 0;
 }
 
 int ObjectArray::validate() const {

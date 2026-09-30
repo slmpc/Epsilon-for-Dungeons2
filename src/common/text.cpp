@@ -17,6 +17,7 @@ namespace {
 
 HANDLE g_stdout = nullptr;
 HANDLE g_stderr = nullptr;
+HANDLE g_log    = INVALID_HANDLE_VALUE;   // out()/err() 的镜像文件
 bool   g_vt     = false;
 bool   g_color  = true;
 bool   g_inited = false;
@@ -106,8 +107,36 @@ void raw_write(void* handle, std::string_view s) noexcept {
     }
 }
 
-void out(std::string_view s) noexcept { ensure_init(); raw_write(g_stdout, s); }
-void err(std::string_view s) noexcept { ensure_init(); raw_write(g_stderr ? g_stderr : g_stdout, s); }
+void out(std::string_view s) noexcept {
+    ensure_init();
+    raw_write(g_stdout, s);
+    if (g_log != INVALID_HANDLE_VALUE) raw_write(g_log, s);
+}
+
+void err(std::string_view s) noexcept {
+    ensure_init();
+    raw_write(g_stderr ? g_stderr : g_stdout, s);
+    if (g_log != INVALID_HANDLE_VALUE) raw_write(g_log, s);
+}
+
+bool log_open(std::string_view utf8_path) noexcept {
+    log_close();
+    if (utf8_path.empty()) return false;
+    const std::wstring w = to_utf16(utf8_path);
+    if (w.empty()) return false;
+    g_log = ::CreateFileW(w.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    return g_log != INVALID_HANDLE_VALUE;
+}
+
+void log_close() noexcept {
+    if (g_log != INVALID_HANDLE_VALUE) {
+        ::CloseHandle(g_log);
+        g_log = INVALID_HANDLE_VALUE;
+    }
+}
+
+bool log_is_open() noexcept { return g_log != INVALID_HANDLE_VALUE; }
 
 void out_colored(std::string_view color, std::string_view s) noexcept {
     if (!color_enabled() || color.empty()) { out(s); return; }

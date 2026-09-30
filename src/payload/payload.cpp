@@ -107,7 +107,21 @@ std::string make_log_path() {
     const DWORD n = ::GetTempPathW(static_cast<DWORD>(std::size(tmp)), tmp);
     std::string dir = (n > 0) ? to_utf8(std::wstring_view(tmp, n)) : std::string(".");
     if (!dir.empty() && dir.back() == '\\') dir.pop_back();
-    return fmt("{}\\mcd2_payload_{}.log", dir, ::GetCurrentProcessId());
+
+    // 文件名带上本模块的基址。
+    //
+    // 为什么必须唯一: 同一个 DLL 可以被注入多次(换个文件名就行), 而每个副本
+    // 都会尝试打开同一个日志文件。Windows 的共享冲突判定看的是**已存在的
+    // 句柄允许了什么**, 不是新打开者请求了什么 —— 只要先来的那个副本用
+    // FILE_SHARE_READ 打开过, 后来者的 CREATE_ALWAYS 就永远失败, 表现为
+    // "注入了但看不到任何日志"。带上模块基址, 每个副本各写各的, 彻底绕开。
+    HMODULE self = nullptr;
+    ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(&make_log_path), &self);
+
+    return fmt("{}\\mcd2_payload_{}_{:X}.log", dir, ::GetCurrentProcessId(),
+               reinterpret_cast<uint64_t>(self));
 }
 
 std::string timestamp() {
@@ -126,7 +140,14 @@ void log_file_open() noexcept {
     const std::wstring wpath = to_utf16(g_log_path);
 
     // CREATE_ALWAYS: 每次注入重新开始一份, 免得新旧日志混在一起看串。
-    HANDLE h = ::CreateFileW(wpath.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
+    //
+    // ⚠️ 共享模式必须同时给 READ 和 WRITE。只给 FILE_SHARE_READ 的话, 同一个
+    //    进程里已经加载过的旧注入体还持着这个文件的句柄, 新注入体的
+    //    CREATE_ALWAYS 会撞共享冲突而静默失败 —— 于是"第二次注入看不到任何
+    //    日志", 排查时等于被蒙住眼睛。同一个 DLL 可以被注多次(改个文件名
+    //    就行), 所以这个场景是常态而非特例。
+    HANDLE h = ::CreateFileW(wpath.c_str(), GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                              nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
     g_log_file = h;

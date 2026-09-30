@@ -47,6 +47,18 @@ void raw_write(void* handle, std::string_view s) noexcept;
 void out(std::string_view s) noexcept;
 void err(std::string_view s) noexcept;
 
+// ---------------------------------------------------------------- 输出镜像到文件
+// 把 out()/err() 的内容同时写一份到文件。
+//
+// 为什么需要: 注入器常常要提权运行(游戏进程完整性级别更高), 而提权启动时的
+// 输出重定向非常不可靠 —— 各种 shell 包装(cmd /c、PowerShell -File)在 UAC
+// 之后都会因为引号与重定向语义而静默失效。让程序自己写文件就没有这些边界。
+//
+// log_open: utf8 路径; 已存在会被覆盖。返回是否成功。
+bool log_open(std::string_view utf8_path) noexcept;
+void log_close() noexcept;
+[[nodiscard]] bool log_is_open() noexcept;
+
 // 上色输出(自动判断 VT 支持)。
 void out_colored(std::string_view color, std::string_view s) noexcept;
 

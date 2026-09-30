@@ -72,7 +72,6 @@ message(STATUS "MinHook: ${minhook_DIR}")
 # ---------------------------------------------------------------- 公共层
 add_library(mcd2_common STATIC
     src/common/pe_image.cpp
-    src/common/pattern_scan.cpp
     src/common/proc_util.cpp
     src/common/pipe_channel.cpp
     src/common/protocol.cpp

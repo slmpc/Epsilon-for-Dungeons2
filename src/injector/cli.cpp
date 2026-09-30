@@ -20,28 +20,6 @@ namespace {
 
 constexpr std::string_view kProgram = "mcd2_injector";
 
-std::string exe_dir() {
-    wchar_t buf[MAX_PATH * 4]{};
-    const DWORD n = ::GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(std::size(buf)));
-    std::wstring p(buf, n);
-    const size_t slash = p.find_last_of(L"\\/");
-    if (slash == std::wstring::npos) return ".";
-    const std::wstring dir = p.substr(0, slash);
-    const int m = ::WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), static_cast<int>(dir.size()),
-                                        nullptr, 0, nullptr, nullptr);
-    std::string s(static_cast<size_t>(std::max(0, m)), '\0');
-    if (m > 0) ::WideCharToMultiByte(CP_UTF8, 0, dir.c_str(), static_cast<int>(dir.size()),
-                                     s.data(), m, nullptr, nullptr);
-    return s;
-}
-
-// 把相对路径补成绝对路径(目标进程需要绝对路径才能 LoadLibrary)。
-std::string to_absolute(std::string const& p) {
-    if (p.size() >= 2 && p[1] == ':') return p;         // 已是盘符绝对路径
-    if (p.rfind("\\\\", 0) == 0) return p;              // UNC
-    return exe_dir() + "\\" + p;
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------

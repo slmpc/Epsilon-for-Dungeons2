@@ -129,19 +129,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    // 管道名也写进目标环境块作为冗余通路(注入体优先读它, 失败则用约定名)。
-    {
-        std::string detail;
-        const bool env_ok = set_remote_env(target->pid, {
-            {proto::kEnvPipeName, pipe_full_path(channel.pipe_name())},
-        }, &detail);
-        if (env_ok) {
-            if (opt->verbose) out_line(fmt("  远程环境块 : {}", detail));
-        } else if (opt->verbose) {
-            out_line(fmt("  远程环境块 : 写入失败({}) —— 无妨, 注入体用约定名", detail));
-        }
-    }
-
     // ---------------------------------------------------------------- 注入
     out_line("");
     out_colored(ansi::bold, "  正在注入 (CreateRemoteThread + LoadLibraryW)...\n");

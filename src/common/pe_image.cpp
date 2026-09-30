@@ -57,48 +57,6 @@ bool safe_read(void* dst, const void* src, size_t size) noexcept {
     return read_impl(dst, src, size);
 }
 
-// ---------------------------------------------------------------------------
-//  MemoryWalker
-// ---------------------------------------------------------------------------
-namespace {
-constexpr size_t kProbeWindow = 0x10000;   // 64 KiB
-} // namespace
-
-MemoryWalker::MemoryWalker(const void* begin, size_t len) noexcept
-    : begin_(static_cast<const uint8_t*>(begin)),
-      end_(static_cast<const uint8_t*>(begin) + len) {
-    if (!begin_ || len == 0) {
-        win_end_ = begin_;
-        return;
-    }
-    probe_window();
-}
-
-void MemoryWalker::probe_window() noexcept {
-    if (begin_ >= end_) {
-        win_end_ = end_;
-        return;
-    }
-    const size_t avail = static_cast<size_t>(end_ - begin_);
-    const size_t want  = avail < kProbeWindow ? avail : kProbeWindow;
-    // 头尾各摸一字节 ⟹ 整窗落在一个可提交区内 ⟹ 窗内任意地址可访问。
-    if (probe_impl(begin_, want)) {
-        win_end_ = begin_ + want;
-    } else {
-        // 退路: 逐页收窄到第一个不可读页为止。
-        size_t good = 0;
-        while (good + 0x1000 <= want && probe_impl(begin_ + good, 0x1000)) good += 0x1000;
-        win_end_ = begin_ + good;
-    }
-}
-
-bool MemoryWalker::next_window() noexcept {
-    ++windows_;
-    if (win_end_ >= end_) return false;
-    begin_ = win_end_;
-    probe_window();
-    return begin_ < end_;
-}
 
 // ---------------------------------------------------------------------------
 namespace {

@@ -45,23 +45,6 @@ std::string process_path_of(uint32_t pid);
 // 目标是否为 WOW64(32 位)进程。x64 注入器不能把 x64 DLL 塞进 WOW64 进程。
 bool is_wow64_process(uint32_t pid);
 
-// ---------------------------------------------------------------- 远程配置
-// 远程线程注入没有命令行参数可用(LoadLibraryW 只接一个路径), 所以要把
-// 管道名之类的配置送进注入体, 唯一的干净通道是**改写目标进程的环境块**。
-// 注入体在 DllMain 之后用 GetEnvironmentVariableW 就能读到。
-//
-// 实现: 读目标的 PEB → RTL_USER_PROCESS_PARAMETERS::Environment。
-//   优先在原有环境块内存里原地覆盖(不动 PEB 结构、不额外分配);
-//   长度不够时才远程分配新块并改 PEB 指针。
-//
-// 成功返回 true。失败不影响注入本身, 只是注入体会退回 AllocConsole 模式。
-bool set_remote_env(uint32_t pid,
-                    std::vector<std::pair<std::wstring, std::wstring>> const& vars,
-                    std::string* detail = nullptr);
-
-// 读目标进程环境块(调试用)。
-std::vector<uint8_t> read_env_block(uint32_t pid);
-
 // ---------------------------------------------------------------- 远程内存
 uint64_t remote_alloc(uint32_t pid, size_t size, uint32_t protect = 0x04 /*PAGE_READWRITE*/);
 bool     remote_free(uint32_t pid, uint64_t addr, uint32_t free_type = 0x8000 /*MEM_RELEASE*/);

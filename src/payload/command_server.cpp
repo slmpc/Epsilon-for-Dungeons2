@@ -328,8 +328,8 @@ void CommandServer::cmd_props(std::vector<std::string> const& args) {
     const auto& layout = eng_.reflection().layout();
 
     emit_fmt("=== {} 的属性链 ===", eng_.objects().name_of(cls));
-    emit_fmt("布局: Next=+{:#x} Name=+{:#x} Offset=+{:#x}  置信度 {}/3",
-             layout.field_next, layout.field_name, layout.prop_offset, layout.confidence);
+    emit_fmt("布局: Next=+{:#x} Name=+{:#x} Offset=+{:#x}",
+             layout.field_next, layout.field_name, layout.prop_offset);
     emit_line("");
 
     if (!inherited) {

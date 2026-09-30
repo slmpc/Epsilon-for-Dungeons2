@@ -22,11 +22,38 @@
 | 约束 | 落实方式 |
 |---|---|
 | **只做注入** | 已删除 `eject_dll()`、`--eject`、`-e`。`proc_util.h` 里写明了为什么不提供卸载：注入体挂钩子/起线程后半途 `FreeLibrary` 会留下悬空回调，目标必崩 |
-| **单一方案，不做多路 fallback** | Present 定位只保留 vtable 一条路（删掉了特征码扫描兜底）；管道名只保留 PID 推导的约定名；注入体删掉了 `AllocConsole` 备用输出与 console sink 分支 |
+| **单一方案，不做多路 fallback** | 见 §3「已删除的 fallback」——共砍掉 10 处多方案分支、2 个模块、约 470 行 |
 | **MinHook** | vcpkg manifest 依赖 `minhook 1.3.4`（`x64-windows-static`），注入体静态链接 |
 | **vcpkg** | `vcpkg.json` + `CMakePresets.json` 里的 toolchain 文件路径 |
 | **C++23 / MSVC** | `/std:c++latest`，MSVC 19.51.36256.0，`/W4` 下 **0 error 0 warning** |
 | **不要卸载 DLL** | 无 `FreeLibrary` 路径；`shutdown_runtime()` 只断管道 |
+
+---
+
+## 3. 已删除的 fallback（2026-09-30 精简）
+
+按"同一问题不允许有多条实现路径"的要求做过一次全量审计，删掉以下内容：
+
+| 删除项 | 原 fallback 链 | 现在 |
+|---|---|---|
+| **管道名两候选** | 环境变量 `MCD2_PIPE_NAME` → PID 推导约定名 | 只用 PID 推导 |
+| **远程环境块改写** | 4a 原地覆盖 → 4b 远程分配 + 改 PEB 指针 | **整块删除**（连带 PEB 操作、`NtQueryInformationProcess`、约 190 行） |
+| **GObjects 三路** | 实测 RVA → RVA−0x10 → `.text` 特征码扫描 | 只用实测 RVA + 结构校验 |
+| **GNames 两路** | 实测 RVA → 扫 `.data` 找 `FNamePool::Blocks` | 只用实测 RVA + 名字命中率校验 |
+| **GEngine/GWorld 两路** | 实测 RVA → 扫几十 MB `.data` | 只用实测 RVA + 类名校验 |
+| **属性链布局六选一** | 6 组候选布局投票 | 钉死为 `Next=+0x20 Name=+0x28 Offset=+0x40` |
+| **`pattern_scan` 模块** | 特征码扫描 + RIP 解析 | **整个模块删除**（砍完零引用） |
+| **`MemoryWalker`** | 窗口探测遍历内存 | **删除**（仅被上面两处使用，砍完零引用） |
+| **死代码 `to_absolute`、`exe_dir`** | 从未被调用 | 删除 |
+
+**保留的**（不是 fallback，砍了会坏事）：
+
+- `world.cpp` 里"反射问不到偏移 → 用实测经验值 `+0x30`/`+0x40`" —— 游戏更新后反射失效时，这是唯一能让 `actors`/`world` 继续工作的路径
+- `command_server` 里"本类找不到属性 → 沿继承链找" —— 这是语义正确的行为，不是兜底
+- 引擎定位失败重试 3 次 / 管道连接重试 —— 是重试，不是换方案
+- §7 全部安全机制：`safe_read`(SEH)、`ObjectArray::validate` 三级置信度、节区边界检查、`text.cpp` 的 VT 检测
+
+**砍掉的代价（必须记住）**：工具现在**只对当前这个二进制版本有效**。游戏一旦更新，四个 RVA 全部失效，工具会明确报"未定位"而不是尝试自动重定位。维护动作 = 更新 `engine.h` 里的 `baseline::` 四个常量 + `reflection.h` 里的布局常量。这是可预测的手工动作，换来了代码量减半和没有"某条 fallback 悄悄走错路"的风险。
 
 ---
 
@@ -116,15 +143,15 @@ mcd2> quit     →  bye, 运行时停止
 
 ---
 
-## 6. 待办
+## 9. 待办
 
 - [ ] **真机验证**：对运行中的 `Dungeons-Win64-Shipping.exe` 注入，核验
       GObjects/GNames 定位到的 RVA 是否与实测基线一致（`0x0BEA8BF0` / `0x0BDC5040`）
 - [ ] 游戏内实测 `objects` / `props Character` / `actors` 的输出内容
+      —— 这一步同时能验证 `reflection.h` 里钉死的布局常量对不对
 - [ ] `README.md`：用法、命令表、基线数据、维护说明
 - [ ] 排查 Present 钩子在被注入的 DLL 上下文里崩溃的原因
       （普通进程里已验证正常，见 `tests/d3d_probe` 输出）
-- [ ] git commit
 
 ---
 

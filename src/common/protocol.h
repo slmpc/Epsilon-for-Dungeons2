@@ -52,11 +52,4 @@ struct Hello {
     char     tag[32]     = {};   // 注入体标识串, 便于人眼确认
 };
 
-// 环境变量名: 注入器写进目标进程, 注入体在 DllMain 阶段读取。
-// 这是"热注入"下把配置送进注入体的唯一可靠通道 —— 命令行参数拿不到。
-inline constexpr wchar_t kEnvPipeName[]   = L"MCD2_PIPE_NAME";
-inline constexpr wchar_t kEnvVerbose[]    = L"MCD2_VERBOSE";
-inline constexpr wchar_t kEnvAutoCommand[] = L"MCD2_AUTO_COMMAND";
-inline constexpr wchar_t kEnvLogFile[]    = L"MCD2_LOG_FILE";
-
 } // namespace mcd2::proto

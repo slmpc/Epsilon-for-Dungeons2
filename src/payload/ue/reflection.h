@@ -28,8 +28,9 @@
 //          +0x38  uint64     PropertyFlags
 //          +0x40  int32      Offset_Internal  ← 我们要的东西
 //
-//  这些偏移可能随引擎版本变动, 所以**不盲信硬编码**: 用一组候选偏移组合去
-//  遍历属性链, 谁能让链条干净走通就给谁投票, 最高分才采信。
+//  这些偏移**只认实测基线, 不做多方案探测**。游戏更新后如果布局变了,
+//  `props` 命令输出的偏移会明显不合常理(值荒谬或属性名读不出来),
+//  那时改这里的常量即可 —— 比维护一套自动探测更可预测。
 // ============================================================================
 #pragma once
 
@@ -42,14 +43,22 @@
 
 namespace mcd2::ue {
 
-class ObjectArray;   // 仅用于 calibrate 采样
-
-// 已确认的 UStruct 偏移(UE5 各版本间很稳定)
+// UStruct 层偏移(UE5 各版本间很稳定, 实测于 5.6.1)
 inline constexpr uint32_t kOffStructSuper      = 0x40;
 inline constexpr uint32_t kOffStructChildren   = 0x48;
 inline constexpr uint32_t kOffStructChildProps = 0x50;
 inline constexpr uint32_t kOffStructPropsSize  = 0x58;
-inline constexpr uint32_t kOffFieldNext        = 0x28;   // UField::Next
+
+// FField / FProperty 层偏移。集中在结构体里, 改一处即可。
+struct ReflectionLayout {
+    uint32_t field_next    = 0x20;   // FField::Next
+    uint32_t field_name    = 0x28;   // FField::NamePrivate (FName)
+    uint32_t field_class   = 0x08;   // FField::ClassPrivate(用来判属性类型)
+    uint32_t prop_arraydim = 0x30;
+    uint32_t prop_size     = 0x34;
+    uint32_t prop_flags    = 0x38;
+    uint32_t prop_offset   = 0x40;   // ← Offset_Internal
+};
 
 struct PropertyField {
     uint64_t    address = 0;      // FProperty*
@@ -61,18 +70,6 @@ struct PropertyField {
     int32_t     size = 0;         // ElementSize
     int32_t     array_dim = 1;    // ArrayDim
     uint64_t    flags = 0;
-};
-
-// 属性链的偏移组合。默认值是 UE5.6 常见布局, 会被 calibrate() 校正。
-struct ReflectionLayout {
-    uint32_t field_next    = 0x20;   // FField::Next
-    uint32_t field_name    = 0x28;   // FField::NamePrivate (FName)
-    uint32_t prop_arraydim = 0x30;
-    uint32_t prop_size     = 0x34;
-    uint32_t prop_flags    = 0x38;
-    uint32_t prop_offset   = 0x40;
-    int      confidence    = 0;      // 0..3, 越高越可信
-    std::string source;              // 定下来的依据
 };
 
 class Reflection {
@@ -96,16 +93,12 @@ public:
     [[nodiscard]] std::string class_name_of(uint64_t obj) const;
 
     [[nodiscard]] ReflectionLayout const& layout() const noexcept { return layout_; }
+    // 需要适配别的引擎版本时, 在这里整体替换布局常量。
     void set_layout(ReflectionLayout const& l) { layout_ = l; }
-
-    // 用一组样本类探测并落定布局。返回 confidence。
-    int calibrate(ObjectArray const& objects);
 
 private:
     [[nodiscard]] std::string field_name(uint64_t field) const;
     [[nodiscard]] std::vector<PropertyField> walk(uint64_t first_field, size_t limit) const;
-    [[nodiscard]] int score_chain(uint64_t first_field, ReflectionLayout const& l,
-                                  size_t probe = 12) const;
 
     NamePool const*  names_ = nullptr;
     ReflectionLayout layout_{};

@@ -52,17 +52,4 @@ private:
     uint64_t blocks_ = 0;
 };
 
-// 从模块内存里搜索 FNamePool::Blocks 数组的地址。
-//
-//  思路(与 analysis/re/mcd2.py 的 find_gnames 同源, 但 C++ 侧更严格):
-//    在 .data 里找 64 KiB 对齐、且指向一段合法 FNameEntry 链的指针。
-//    命中之后再向前回退, 找到这个指针数组的起始处 —— 那就是 Blocks[]。
-//
-//  参数:
-//    data_base / data_size : .data 节区的运行时地址与长度
-//    max_candidates        : 最多检查多少个候选(限制耗时)
-//  返回: Blocks 数组地址, 0 表示没找到。
-uint64_t locate_name_pool_blocks(uint64_t data_base, size_t data_size,
-                                 size_t max_candidates = 4096);
-
 } // namespace mcd2::ue

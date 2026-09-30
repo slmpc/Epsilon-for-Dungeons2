@@ -77,29 +77,6 @@ bool probe_readable(const void* addr, size_t size) noexcept;
 // 安全读: 先探测再拷贝。失败返回 false, 不动 out。
 bool safe_read(void* dst, const void* src, size_t size) noexcept;
 
-// 顺序遍历一段内存的辅助器。语义 = 逐字节探测:
-//   walker.good_at(p) 为真 ⟹ p 处访问安全; 为假 ⟹ 调用方跳过该片区域。
-// 实现上用"窗口探测 + 窗口内任意位置可访问"来避免每个字节一次 SEH。
-// 特征码扫描是热路径(200 MB 映像), 这个优化不是可选项。
-class MemoryWalker {
-public:
-    MemoryWalker(const void* begin, size_t len) noexcept;
-    [[nodiscard]] const uint8_t* begin() const noexcept { return begin_; }
-    [[nodiscard]] const uint8_t* end() const noexcept { return end_; }
-    [[nodiscard]] const uint8_t* window_end() const noexcept { return win_end_; }
-    [[nodiscard]] bool good_at(const uint8_t* p) const noexcept { return p < win_end_; }
-    // 跳到下一个窗口, 返回是否还有内容。
-    bool next_window() noexcept;
-    [[nodiscard]] size_t windows() const noexcept { return windows_; }
-
-private:
-    void probe_window() noexcept;
-    const uint8_t* begin_ = nullptr;
-    const uint8_t* end_ = nullptr;
-    const uint8_t* win_end_ = nullptr;
-    size_t windows_ = 0;
-};
-
 // 模板包装: 读一个 POD,T 必须是平凡可拷贝类型。
 template <typename T>
 [[nodiscard]] std::optional<T> safe_read_pod(uint64_t addr) noexcept {

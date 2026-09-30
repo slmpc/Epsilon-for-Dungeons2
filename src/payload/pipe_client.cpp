@@ -22,30 +22,12 @@
 #include <windows.h>
 
 #include <mutex>
-#include <vector>
 
 namespace mcd2::payload {
 namespace {
 
 std::mutex            g_mu;
 std::function<void()> g_on_disconnect;
-
-std::wstring read_env_wstring(wchar_t const* key) {
-    wchar_t buf[1024]{};
-    const DWORD n = ::GetEnvironmentVariableW(key, buf, static_cast<DWORD>(std::size(buf)));
-    if (n == 0 || n >= std::size(buf)) return {};
-    return std::wstring(buf, n);
-}
-
-// 环境变量里可能存的是完整路径(\\.\pipe\NAME), 也可能只是裸名。统一成裸名。
-std::wstring strip_pipe_prefix(std::wstring s) {
-    constexpr std::wstring_view kPrefix = L"\\\\.\\pipe\\";
-    if (s.size() > kPrefix.size() &&
-        _wcsnicmp(s.c_str(), kPrefix.data(), kPrefix.size()) == 0) {
-        return s.substr(kPrefix.size());
-    }
-    return s;
-}
 
 } // namespace
 
@@ -54,35 +36,20 @@ bool connect_injector_pipe(uint32_t retry_ms, std::string* error) {
 
     auto& c = ctx();
 
-    // 候选管道名, 按优先级:
-    //   1) 环境变量 MCD2_PIPE_NAME —— 注入器会写(但如果目标侧读不到就白搭)
-    //   2) PID 推导的约定名        —— 两端各自算, 不依赖任何传递
-    std::vector<std::wstring> candidates;
-    if (auto from_env = read_env_wstring(proto::kEnvPipeName); !from_env.empty()) {
-        candidates.push_back(strip_pipe_prefix(std::move(from_env)));
-    }
-    candidates.push_back(default_pipe_name(::GetCurrentProcessId()));
+    // 管道名 = 由本进程 PID 推导的约定名。
+    //   注入器用目标 PID 算出同一个字符串, 注入体用自己的 PID 也得到它 ——
+    //   两端零传递。这是**唯一**的通路: 早先还试过用环境变量传递, 实测
+    //   GetEnvironmentVariableW 读不到被外部改写的 PEB, 那条路从未生效,
+    //   已删除(连同注入器侧整个 PEB 改写代码)。
+    const std::wstring name = default_pipe_name(::GetCurrentProcessId());
 
-    std::string last_err;
-    for (size_t i = 0; i < candidates.size(); ++i) {
-        // retry_ms 只给第一个候选; 第二个候选不必再等一遍。
-        const uint32_t wait = (i == 0) ? retry_ms : 0;
-        if (c.pipe.connect(candidates[i], wait, &last_err)) {
-            c.pipe_connected = true;
-            return true;
-        }
+    std::string err;
+    if (!c.pipe.connect(name, retry_ms, &err)) {
+        if (error) *error = fmt("连接管道 {} 失败: {}", to_utf8(name), err);
+        return false;
     }
-
-    if (error) {
-        std::string tried;
-        for (size_t i = 0; i < candidates.size(); ++i) {
-            if (i) tried += ", ";
-            tried += to_utf8(candidates[i]);
-        }
-        *error = fmt("尝试 {} 个管道名均失败 [{}], 最后错误: {}",
-                     candidates.size(), tried, last_err);
-    }
-    return false;
+    c.pipe_connected = true;
+    return true;
 }
 
 bool pipe_connected() {

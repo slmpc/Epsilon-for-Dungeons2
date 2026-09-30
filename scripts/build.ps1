@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    配置并编译 MCD2 热注入框架 (Ninja + MSVC + vcpkg)。
+    配置并编译 Epsilon For Dungeons II (Ninja + MSVC + vcpkg)。
 
 .DESCRIPTION
     为什么需要这个脚本:
@@ -15,7 +15,7 @@
     CMake preset 名。默认 release。
 
 .PARAMETER Target
-    只编译指定 target (例如 mcd2_testtarget)。留空编译全部。
+    只编译指定 target (例如 epsilonTestTarget)。留空编译全部。
 
 .PARAMETER Fresh
     删掉现有 build 目录重新配置。
@@ -26,7 +26,7 @@
 .EXAMPLE
     .\scripts\build.ps1
     .\scripts\build.ps1 -Preset debug -Fresh
-    .\scripts\build.ps1 -Target mcd2_testtarget
+    .\scripts\build.ps1 -Target epsilonTestTarget
 #>
 [CmdletBinding()]
 param(

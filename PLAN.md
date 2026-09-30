@@ -1,4 +1,4 @@
-# MCD2 热注入框架 — 开发计划 / 进度台账
+# Epsilon For Dungeons II — 热注入框架 — 开发计划 / 进度台账
 
 > 状态：**注入链路已端到端跑通并验证**（见 §4 实测记录）
 > 目标：C++23 + MSVC + CMake + **MinHook(vcpkg)** 的远程线程注入器 +
@@ -10,12 +10,12 @@
 
 | # | 产物 | 验收标准 | 状态 |
 |---|---|---|---|
-| 1 | `build/release/bin/mcd2_injector.exe` | 选进程 → 建管道 → `CreateRemoteThread(LoadLibraryW)` 注入 → 等 ready → 下发命令 / 交互 shell | ✅ **已验证** |
-| 2 | `build/release/bin/mcd2_payload.dll` | 连管道 → 定位 GObjects/GNames → 重建属性偏移 → 响应命令 | ✅ **已验证** |
+| 1 | `build/release/bin/epsilonInjector.exe` | 选进程 → 建管道 → `CreateRemoteThread(LoadLibraryW)` 注入 → 等 ready → 下发命令 / 交互 shell | ✅ **已验证** |
+| 2 | `build/release/bin/epsilonPayload.dll` | 连管道 → 定位 GObjects/GNames → 重建属性偏移 → 响应命令 | ✅ **已验证** |
 | 3 | **D3D12 ImGui 覆盖层** | 挂钩 Present → 用游戏自己的命令队列渲染 ImGui 面板显示引擎/钩子/对象数据，Insert 开关 | ✅ **已验证（截图确认）** |
-| 4 | `build/release/bin/mcd2_testtarget.exe` | 无 D3D / 无 UE 的靶子，验证链路与优雅降级 | ✅ **已验证** |
-| 5 | `build/release/bin/d3d12_target.exe` | 真实出帧的 D3D12 窗口程序，用于验证 Present 钩子与覆盖层 | ✅ **已验证** |
-| 6 | 诊断工具 `d3d_probe` / `pipe_test` | 隔离验证 D3D 调用与管道双向收发 | ✅ 已完成 |
+| 4 | `build/release/bin/epsilonTestTarget.exe` | 无 D3D / 无 UE 的靶子，验证链路与优雅降级 | ✅ **已验证** |
+| 5 | `build/release/bin/d3d12Target.exe` | 真实出帧的 D3D12 窗口程序，用于验证 Present 钩子与覆盖层 | ✅ **已验证** |
+| 6 | 诊断工具 `d3dProbe` / `pipeTest` | 隔离验证 D3D 调用与管道双向收发 | ✅ 已完成 |
 
 ---
 
@@ -23,14 +23,14 @@
 
 | 约束 | 落实方式 |
 |---|---|
-| **只做注入** | 已删除 `eject_dll()`、`--eject`、`-e`。`proc_util.h` 里写明了为什么不提供卸载：注入体挂钩子/起线程后半途 `FreeLibrary` 会留下悬空回调，目标必崩 |
+| **只做注入** | 已删除 `ejectDll()`、`--eject`、`-e`。`ProcUtil.h` 里写明了为什么不提供卸载：注入体挂钩子/起线程后半途 `FreeLibrary` 会留下悬空回调，目标必崩 |
 | **单一方案，不做多路 fallback** | 见 §3「已删除的 fallback」——共砍掉 10 处多方案分支、2 个模块、约 470 行 |
 | **MinHook** | vcpkg manifest 依赖 `minhook 1.3.4`（`x64-windows-static`），注入体静态链接 |
 | **D3D12** | 全流程只走 D3D12：定位 Present 用临时 D3D12 设备；覆盖层用 `imgui_impl_dx12` + `imgui_impl_win32` |
 | **ImGui** | vcpkg `imgui 1.92.8`（features: `dx12-binding` + `win32-binding`）。**UI 文案一律英文** —— 内置字体只有 ASCII，混入中文会显示成 `?` |
 | **vcpkg** | `vcpkg.json` + `CMakePresets.json` 里的 toolchain 文件路径 |
 | **C++23 / MSVC** | `/std:c++latest`，MSVC 19.51.36256.0，`/W4` 下 **0 error 0 warning** |
-| **不要卸载 DLL** | 无 `FreeLibrary` 路径；`shutdown_runtime()` 只断管道 |
+| **不要卸载 DLL** | 无 `FreeLibrary` 路径；`shutdownRuntime()` 只断管道 |
 
 ---
 
@@ -40,13 +40,13 @@
 
 | 删除项 | 原 fallback 链 | 现在 |
 |---|---|---|
-| **管道名两候选** | 环境变量 `MCD2_PIPE_NAME` → PID 推导约定名 | 只用 PID 推导 |
+| **管道名两候选** | 环境变量 `EPSILON_PIPE_NAME` → PID 推导约定名 | 只用 PID 推导 |
 | **远程环境块改写** | 4a 原地覆盖 → 4b 远程分配 + 改 PEB 指针 | **整块删除**（连带 PEB 操作、`NtQueryInformationProcess`、约 190 行） |
 | **GObjects 三路** | 实测 RVA → RVA−0x10 → `.text` 特征码扫描 | 只用实测 RVA + 结构校验 |
 | **GNames 两路** | 实测 RVA → 扫 `.data` 找 `FNamePool::Blocks` | 只用实测 RVA + 名字命中率校验 |
 | **GEngine/GWorld 两路** | 实测 RVA → 扫几十 MB `.data` | 只用实测 RVA + 类名校验 |
 | **属性链布局六选一** | 6 组候选布局投票 | 钉死为 `Next=+0x20 Name=+0x28 Offset=+0x40` |
-| **`pattern_scan` 模块** | 特征码扫描 + RIP 解析 | **整个模块删除**（砍完零引用） |
+| **`patternScan` 模块** | 特征码扫描 + RIP 解析 | **整个模块删除**（砍完零引用） |
 | **`MemoryWalker`** | 窗口探测遍历内存 | **删除**（仅被上面两处使用，砍完零引用） |
 | **死代码 `to_absolute`、`exe_dir`** | 从未被调用 | 删除 |
 
@@ -64,11 +64,11 @@
 ## 3. 架构
 
 ```
-mcd2_injector.exe                           mcd2_payload.dll
+epsilonInjector.exe                           epsilonPayload.dll
 ┌──────────────────────────┐                ┌────────────────────────────┐
 │ 1. 选目标进程            │                │ DllMain: 只 CreateThread    │
 │ 2. 建命名管道            │                │   (绝不在加载锁里干活)      │
-│    MCD2HotInject.<pid>   │                │                            │
+│    EpsilonHotInject.<pid> │                │                            │
 │ 3. 写目标环境块(冗余通路)│                │ runtime_main:              │
 │ 4. CreateRemoteThread    │  命名管道      │  ├ 连管道                  │
 │    (LoadLibraryW)        │◄──────────────►│  ├ 定位 GObjects/GNames    │
@@ -76,7 +76,7 @@ mcd2_injector.exe                           mcd2_payload.dll
 │ 6. 命令行 UI / 交互 shell│                │  └ 命令循环                │
 └──────────────────────────┘                └────────────────────────────┘
                                               ↓ 落盘
-                                    %TEMP%\mcd2_payload_<pid>.log
+                                    %TEMP%\epsilonPayload_<pid>.log
 ```
 
 **为什么注入体不能直接写控制台**：`Dungeons-Win64-Shipping.exe` 是 GUI 子系统、
@@ -90,7 +90,7 @@ mcd2_injector.exe                           mcd2_payload.dll
 
 ## 4. 实测记录
 
-### 4.1 端到端闭环（`mcd2_testtarget.exe`）
+### 4.1 端到端闭环（`epsilonTestTarget.exe`）
 
 ```
 [+] 注入成功 (0 ms)   远端 HMODULE : 0x00000094570000
@@ -99,9 +99,9 @@ mcd2_injector.exe                           mcd2_payload.dll
 [注入体] 引擎定位 第 1/2/3 次尝试...
 [注入体] 引擎定位失败(降级为元命令模式)
 [+] 注入体已就绪
-mcd2> status   →  完整引擎状态报告
-mcd2> hooks    →  帧钩子状态
-mcd2> quit     →  bye, 运行时停止
+epsilon> status   →  完整引擎状态报告
+epsilon> hooks    →  帧钩子状态
+epsilon> quit     →  bye, 运行时停止
 靶子存活: 是（注入体正常驻留）
 ```
 
@@ -112,8 +112,8 @@ mcd2> quit     →  bye, 运行时停止
 
 | 项 | 值 |
 |---|---|
-| `mcd2_injector.exe` | 523,776 B |
-| `mcd2_payload.dll` | 1,797,632 B |
+| `epsilonInjector.exe` | 523,776 B |
+| `epsilonPayload.dll` | 1,797,632 B |
 | DLL 导入依赖 | **仅 `KERNEL32.dll` + `USER32.dll`**（静态 CRT，无 VCRUNTIME140/MSVCP140） |
 | EXE 导入依赖 | 仅 `KERNEL32.dll` |
 | 编译器 | MSVC 19.51.36256.0，`/W4` 0 warning |
@@ -138,14 +138,14 @@ mcd2> quit     →  bye, 运行时停止
 | 10 | Present 钩子一挂上，目标进程立刻死 | **根因是 D3D11**：为了取 vtable 去建了一个临时 D3D11 设备，而目标进程里没有可用的 D3D11 上下文，`D3D11CreateDeviceAndSwapChain` 直接把进程带走。改用 **D3D12** 原生建（`D3D12CreateDevice` → `CreateCommandQueue` → `CreateSwapChainForHwnd`）后彻底消失 | 全流程 D3D12；整段放进 SEH 抓异常码 |
 | 11 | 覆盖层"全部成功但屏幕上什么都没有" | **flip 模型交换链与创建它的队列绑定**。我们用自己的队列渲染：命令执行了、围栏完成了、日志全绿，但画面不进入呈现结果 | 挂钩 `ID3D12CommandQueue::ExecuteCommandLists` 捕获游戏队列，覆盖层改用它渲染 |
 | 12 | 同上，另一层 | Release 下 `IM_ASSERT` 是空操作，ImGui 后端在 PSO 创建失败时静默什么都不画 | 显式调 `ImGui_ImplDX12_CreateDeviceObjects()` 并检查返回值 |
-| 13 | `d3d12_target` 一启动就退（`hr=0x0` 但指针为 null） | 把"调用"和"检查出参"塞进同一个函数调用的实参里，MSVC 从右往左求值，出参在调用前就被读走 | 拆成两条语句 |
+| 13 | `d3d12Target` 一启动就退（`hr=0x0` 但指针为 null） | 把"调用"和"检查出参"塞进同一个函数调用的实参里，MSVC 从右往左求值，出参在调用前就被读走 | 拆成两条语句 |
 
 **方法论**：第 5–9 条全部靠"可观测性"定位。注入体被塞进无控制台的进程，
 出问题只能看到"进程没了"。所以加了：
-- `trace()` 落盘到 `%TEMP%\mcd2_payload_<pid>.log`，每条 flush，**关键步骤之间全部留痕**
+- `trace()` 落盘到 `%TEMP%\epsilonPayload_<pid>.log`，每条 flush，**关键步骤之间全部留痕**
 - `trace()` 同时记录 `[未送出]` 标记，把"没写"和"写了没到"直接分开
-- `tests/d3d_probe` 在普通进程里复现同一段 D3D 代码，隔离注入上下文
-- `tests/pipe_test` 把管道双向收发单独跑，隔离注入环境
+- `tests/d3dProbe` 在普通进程里复现同一段 D3D 代码，隔离注入上下文
+- `tests/pipeTest` 把管道双向收发单独跑，隔离注入环境
 
 第 9 条正是靠 `[未送出]` 标记一眼看出来的。
 
@@ -159,7 +159,7 @@ mcd2> quit     →  bye, 运行时停止
       —— 这一步同时能验证 `reflection.h` 里钉死的布局常量对不对
 - [ ] `README.md`：用法、命令表、基线数据、维护说明
 - [ ] 排查 Present 钩子在被注入的 DLL 上下文里崩溃的原因
-      （普通进程里已验证正常，见 `tests/d3d_probe` 输出）
+      （普通进程里已验证正常，见 `tests/d3dProbe` 输出）
 
 ---
 
@@ -171,14 +171,14 @@ mcd2> quit     →  bye, 运行时停止
    放掉引用计数就会把地址变成野指针。
 3. **`vtable[8]` 是 `IDXGISwapChain::Present`**。索引 = `IUnknown`(3) +
    `IDXGIObject`(4，注意有 `GetPrivateData`) + `IDXGIDeviceSubObject`(1) = 8。
-   已对着 SDK 的 `dxgi.h` 数过，并用 `d3d_probe` 运行时验证。
+   已对着 SDK 的 `dxgi.h` 数过，并用 `d3dProbe` 运行时验证。
 4. **`vtable[10]` 是 `ID3D12CommandQueue::ExecuteCommandLists`**。索引 =
    `IUnknown`(3) + `ID3D12Object`(4) + `ID3D12DeviceChild`(1) +
    `ID3D12Pageable`(0) + `UpdateTileMappings`/`CopyTileMappings`(2) = 10。
 5. **不要把"调用"和"检查出参"塞进同一个函数调用**。C++ 未规定实参求值顺序，
    MSVC 从右往左 —— `check(CreateDevice(...), g_device, ...)` 里的 `g_device`
    会在调用发生**之前**被读走，拿到永远是 null 的旧值。必须拆成两条语句。
-   （这个坑让我在 `d3d12_target` 上白排查了一轮。）
+   （这个坑让我在 `d3d12Target` 上白排查了一轮。）
 6. **D3D12 的 flip 模型交换链与"创建它的那条队列"绑定**。在别的队列上渲染，
    命令会执行、围栏会完成、日志全绿，**但画面不会进入呈现结果**。覆盖层因此
    必须用游戏自己的队列 —— 靠挂钩 `ExecuteCommandLists` 捕获。
@@ -202,7 +202,7 @@ mcd2> quit     →  bye, 运行时停止
 14. **`WIN32_LEAN_AND_MEAN` 之后要显式 include** `<psapi.h>`（`MODULEINFO`）、
     `<unknwn.h>`（`IUnknown`/`IID`）。
 15. **管道方向不对称时先怀疑对象错配**，不要怀疑内核。
-16. **改代码前先关掉所有靶子进程**，否则 `mcd2_payload.dll` 被锁，
+16. **改代码前先关掉所有靶子进程**，否则 `epsilonPayload.dll` 被锁，
     link 报 `LNK1104`。
 17. **ImGui 覆盖层的 UI 文案不要写中文** —— 内置字体只有 ASCII。
 
@@ -218,21 +218,21 @@ vcpkg install --triplet x64-windows-static
 # 构建（脚本会自动导入 vcvars64 并钉死 MSVC）
 .\scripts\build.ps1                     # release
 .\scripts\build.ps1 -Fresh              # 清场重建
-.\scripts\build.ps1 -Target pipe_test   # 只构建某个 target
+.\scripts\build.ps1 -Target pipeTest   # 只构建某个 target
 
 # 自测（不碰游戏）
-.\build\release\bin\mcd2_testtarget.exe          # 一个窗口
-.\build\release\bin\mcd2_injector.exe -n mcd2_testtarget.exe -i
+.\build\release\bin\epsilonTestTarget.exe          # 一个窗口
+.\build\release\bin\epsilonInjector.exe -n epsilonTestTarget.exe -i
 
 # 真机
-.\build\release\bin\mcd2_injector.exe -l --filter Dungeons
-.\build\release\bin\mcd2_injector.exe -i
-.\build\release\bin\mcd2_injector.exe --exec status --exec "props Character"
+.\build\release\bin\epsilonInjector.exe -l --filter Dungeons
+.\build\release\bin\epsilonInjector.exe -i
+.\build\release\bin\epsilonInjector.exe --exec status --exec "props Character"
 
 # 诊断
-.\build\release\bin\d3d_probe.exe                # D3D 交换链取 Present
-.\build\release\bin\pipe_test.exe server         # 管道双向收发
-.\build\release\bin\pipe_test.exe client <pid>
+.\build\release\bin\d3dProbe.exe                # D3D 交换链取 Present
+.\build\release\bin\pipeTest.exe server         # 管道双向收发
+.\build\release\bin\pipeTest.exe client <pid>
 ```
 
-**排查注入体问题时先看**：`%TEMP%\mcd2_payload_<pid>.log`
+**排查注入体问题时先看**：`%TEMP%\epsilonPayload_<pid>.log`

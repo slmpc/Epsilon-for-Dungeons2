@@ -1,7 +1,7 @@
 {
-  "name": "mcd2-hotinject",
+  "name": "epsilon-for-dungeons-2",
   "version": "0.1.0",
-  "description": "Minecraft Dungeons II 热注入框架: 远程线程注入器 + UE5 运行时反射数据采集 + D3D12 覆盖层",
+  "description": "Epsilon For Dungeons II — Minecraft Dungeons II 热注入框架: 远程线程注入器 + UE5 运行时反射数据采集 + D3D12 覆盖层",
   "homepage": "https://github.com/OpenEpsilon/EpsilonForDungeons2",
   "license": "MIT",
   "dependencies": [

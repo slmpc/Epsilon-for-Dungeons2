@@ -1,17 +1,17 @@
 cmake_minimum_required(VERSION 3.25)
 
 # ============================================================================
-#  MCD2 Hot-Injection Framework
+#  Epsilon For Dungeons II
 #  Minecraft Dungeons II (UE 5.6) — 热注入 + 运行时反射数据采集
 #
 #  目标:
-#    mcd2_injector.exe  控制台前端: 定位进程 / RemoteThread 注入 / 管道 UI
-#    mcd2_payload.dll   注入体: 运行时反射内省 + MinHook 帧回调 + 命令服务
+#    epsilonInjector.exe  控制台前端: 定位进程 / RemoteThread 注入 / 管道 UI
+#    epsilonPayload.dll   注入体: 运行时反射内省 + MinHook 帧回调 + 命令服务
 # ============================================================================
 
-project(mcd2_hotinject
+project(epsilonForDungeons2
     VERSION 0.1.0
-    DESCRIPTION "MCD2 hot-injection and runtime reflection framework"
+    DESCRIPTION "Epsilon For Dungeons II — hot-injection and runtime reflection framework"
     LANGUAGES CXX)
 
 # ---------------------------------------------------------------- 编译数据库
@@ -68,100 +68,100 @@ message(STATUS "MinHook: ${minhook_DIR}")
 message(STATUS "ImGui  : ${imgui_DIR}")
 
 # ---------------------------------------------------------------- 公共层
-add_library(mcd2_common STATIC
-    src/common/pe_image.cpp
-    src/common/proc_util.cpp
-    src/common/pipe_channel.cpp
-    src/common/protocol.cpp
-    src/common/text.cpp
+add_library(epsilonCommon STATIC
+    src/common/PeImage.cpp
+    src/common/ProcUtil.cpp
+    src/common/PipeChannel.cpp
+    src/common/Protocol.cpp
+    src/common/Text.cpp
 )
-target_include_directories(mcd2_common PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_compile_definitions(mcd2_common PUBLIC MCD2_VERSION="${PROJECT_VERSION}")
+target_include_directories(epsilonCommon PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_compile_definitions(epsilonCommon PUBLIC EPSILON_VERSION="${PROJECT_VERSION}")
 if(MSVC)
-    target_compile_options(mcd2_common PRIVATE /wd4996)
+    target_compile_options(epsilonCommon PRIVATE /wd4996)
 endif()
 # psapi: GetModuleInformation(注入体在 DllMain 里量自己所在模块的大小)
-target_link_libraries(mcd2_common PUBLIC psapi)
+target_link_libraries(epsilonCommon PUBLIC psapi)
 
 # ---------------------------------------------------------------- 注入体 DLL
-add_library(mcd2_payload SHARED
-    src/payload/dllmain.cpp
-    src/payload/runtime.cpp
-    src/payload/payload.cpp
-    src/payload/pipe_client.cpp
-    src/payload/command_server.cpp
-    src/payload/hooks.cpp
-    src/payload/overlay.cpp
-    src/payload/ue/engine.cpp
-    src/payload/ue/name_pool.cpp
-    src/payload/ue/object_array.cpp
-    src/payload/ue/reflection.cpp
-    src/payload/ue/world.cpp
+add_library(epsilonPayload SHARED
+    src/payload/DllMain.cpp
+    src/payload/Runtime.cpp
+    src/payload/Payload.cpp
+    src/payload/PipeClient.cpp
+    src/payload/CommandServer.cpp
+    src/payload/Hooks.cpp
+    src/payload/Overlay.cpp
+    src/payload/ue/Engine.cpp
+    src/payload/ue/NamePool.cpp
+    src/payload/ue/ObjectArray.cpp
+    src/payload/ue/Reflection.cpp
+    src/payload/ue/World.cpp
 )
-target_include_directories(mcd2_payload PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/payload")
+target_include_directories(epsilonPayload PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/payload")
 # dxgi / d3d12 是必须的: 我们自己的代码走 GetProcAddress, 但 ImGui 的 DX12
 # 后端(imgui_impl_dx12.cpp)直接调用了 CreateDXGIFactory1 等符号。
-target_link_libraries(mcd2_payload PRIVATE
-    mcd2_common
+target_link_libraries(epsilonPayload PRIVATE
+    epsilonCommon
     minhook::minhook
     imgui::imgui
     dxgi
     d3d12
 )
-set_target_properties(mcd2_payload PROPERTIES
-    OUTPUT_NAME "mcd2_payload"
+set_target_properties(epsilonPayload PROPERTIES
+    OUTPUT_NAME "epsilonPayload"
     PREFIX ""
     DEBUG_POSTFIX "")
 if(MSVC)
-    target_compile_options(mcd2_payload PRIVATE /Zi)
-    target_link_options(mcd2_payload PRIVATE /DEBUG /INCREMENTAL:NO)
+    target_compile_options(epsilonPayload PRIVATE /Zi)
+    target_link_options(epsilonPayload PRIVATE /DEBUG /INCREMENTAL:NO)
 endif()
 
 # ---------------------------------------------------------------- 注入器 EXE
-add_executable(mcd2_injector
-    src/injector/main.cpp
-    src/injector/cli.cpp
-    src/injector/pipe_server.cpp
+add_executable(epsilonInjector
+    src/injector/Main.cpp
+    src/injector/Cli.cpp
+    src/injector/PipeServer.cpp
 )
-target_include_directories(mcd2_injector PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/injector")
-target_link_libraries(mcd2_injector PRIVATE mcd2_common)
+target_include_directories(epsilonInjector PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/injector")
+target_link_libraries(epsilonInjector PRIVATE epsilonCommon)
 
 # ---------------------------------------------------------------- 自测靶子
 # 一个最小 x64 控制台进程, 用来在不碰游戏的前提下验证整条注入链路:
 #   起靶子 → 注入 → DLL 自报加载 → 采集 → 卸载
 # 它故意什么都不做, 只等输入; 这样注入测试不会牵扯游戏。
-add_executable(mcd2_testtarget EXCLUDE_FROM_ALL
-    tests/test_target/main.cpp
+add_executable(epsilonTestTarget EXCLUDE_FROM_ALL
+    tests/testTarget/Main.cpp
 )
-target_link_libraries(mcd2_testtarget PRIVATE mcd2_common)
+target_link_libraries(epsilonTestTarget PRIVATE epsilonCommon)
 
 # ---------------------------------------------------------------- 一次性诊断工具
-# d3d_probe: 在普通进程里复现 payload 的"临时交换链取 Present"流程,
+# d3dProbe: 在普通进程里复现 payload 的"临时交换链取 Present"流程,
 # 用来区分"D3D 调用本身的问题"和"注入上下文的问题"。
-add_executable(d3d_probe EXCLUDE_FROM_ALL
-    tests/d3d_probe/main.cpp
+add_executable(d3dProbe EXCLUDE_FROM_ALL
+    tests/d3dProbe/Main.cpp
 )
 
-# d3d12_target: 真实出帧的 D3D12 窗口程序。
+# d3d12Target: 真实出帧的 D3D12 窗口程序。
 # 没有游戏在跑时, 用它验证 Present 钩子与 ImGui 覆盖层。
-add_executable(d3d12_target EXCLUDE_FROM_ALL
-    tests/d3d12_target/main.cpp
+add_executable(d3d12Target EXCLUDE_FROM_ALL
+    tests/d3d12Target/Main.cpp
 )
-target_link_libraries(d3d12_target PRIVATE mcd2_common d3d12 dxgi dxguid)
+target_link_libraries(d3d12Target PRIVATE epsilonCommon d3d12 dxgi dxguid)
 
-# pipe_test: 把命名管道双向收发单独拎出来验证。
+# pipeTest: 把命名管道双向收发单独拎出来验证。
 # 注入链路里排查"某方向收不到消息"成本很高, 这个能直接定位是通道代码的
 # 问题还是注入环境的问题。
-add_executable(pipe_test EXCLUDE_FROM_ALL
-    tests/pipe_test/main.cpp
+add_executable(pipeTest EXCLUDE_FROM_ALL
+    tests/pipeTest/Main.cpp
 )
-target_link_libraries(pipe_test PRIVATE mcd2_common)
+target_link_libraries(pipeTest PRIVATE epsilonCommon)
 
 # DLL 与 EXE 同目录, 注入器默认就在这里找 payload
-add_custom_command(TARGET mcd2_injector POST_BUILD
+add_custom_command(TARGET epsilonInjector POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E echo "== 产物 =="
-    COMMAND ${CMAKE_COMMAND} -E echo "  $<TARGET_FILE:mcd2_injector>"
-    COMMAND ${CMAKE_COMMAND} -E echo "  $<TARGET_FILE:mcd2_payload>"
+    COMMAND ${CMAKE_COMMAND} -E echo "  $<TARGET_FILE:epsilonInjector>"
+    COMMAND ${CMAKE_COMMAND} -E echo "  $<TARGET_FILE:epsilonPayload>"
     VERBATIM)
 
-message(STATUS "MCD2 hot-inject: C++${CMAKE_CXX_STANDARD} / toolchain ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "EpsilonForDungeons2: C++${CMAKE_CXX_STANDARD} / toolchain ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")

@@ -7,13 +7,13 @@
 ```
 analysis/
 ├── docs/                     文档与早期工具
-│   ├── MCD2_基址与运行时结构_实测.md          基址/RVA 速查 + 结构自洽校验报告
-│   ├── MCD2_逆向分析_外挂开发切入点.md        目标画像、可行性边界与切入点分析
+│   ├── Dungeons2_基址与运行时结构_实测.md          基址/RVA 速查 + 结构自洽校验报告
+│   ├── Dungeons2_逆向分析_外挂开发切入点.md        目标画像、可行性边界与切入点分析
 │   └── _re_tools/            早期一次性脚本（彼此独立，无互相 import）
 └── re/                       当前可复用的定位器工具链
     ├── pe.py                 ← 被依赖：最小 PE 解析器（节区 / VA 换算）
     ├── live.py               ← 被依赖：活体进程只读访问库（Toolhelp32 + RPM）
-    ├── mcd2.py               主入口：四项定位（GObjects / GNames / GEngine / GWorld）
+    ├── Epsilon.py               主入口：四项定位（GObjects / GNames / GEngine / GWorld）
     ├── find_globals.py       枚举 UObject 并反查 .data 中指向它们的全局指针
     ├── find_engine2.py       发现 UEngine 子类实例并确认 GWorld
     ├── gworld_check.py       对候选全局做代码写引用分析，判定哪个是 GWorld
@@ -40,9 +40,9 @@ analysis/
 
 ```powershell
 # 完整报告（需要游戏进程在运行）
-python analysis\re\mcd2.py
-python analysis\re\mcd2.py --json        # 机器可读
-python analysis\re\mcd2.py --pid 1234    # 指定进程
+python analysis\re\Epsilon.py
+python analysis\re\Epsilon.py --json        # 机器可读
+python analysis\re\Epsilon.py --pid 1234    # 指定进程
 
 # 全局变量定位链
 python analysis\re\find_globals.py       # 落盘 analysis\re\globals_log.txt

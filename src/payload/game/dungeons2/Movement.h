@@ -1,9 +1,3 @@
-// ============================================================================
-//  Movement.h — 玩家移动参数的字段级视图
-//
-//  · UCharacterMovementComponent 的偏移: docs/offsets/character-movement.md
-//  · GAS 属性集 ATR_Movement 的偏移:    docs/offsets/movement-attributes.md
-// ============================================================================
 #pragma once
 
 #include "payload/game/Offsets.h"

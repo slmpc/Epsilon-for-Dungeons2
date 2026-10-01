@@ -1,8 +1,3 @@
-// ============================================================================
-//  Module.h — 功能模块基类(纯框架, 自身不含任何具体模块)。
-//  具体模块继承 Module 并在 ModuleManager 里登记。
-//  与 Java 版的刻意偏离、reset 顺序、默认值陷阱见 docs/features/module-framework.md
-// ============================================================================
 #pragma once
 
 #include "payload/feature/settings/Setting.h"

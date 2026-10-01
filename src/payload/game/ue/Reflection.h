@@ -1,9 +1,3 @@
-// ============================================================================
-//  Reflection.h — 运行时属性偏移重建
-//
-//  UStruct / UField / FField / FProperty 布局: docs/offsets/reflection.md
-//  本构建上反射链路不可用的实测记录: docs/reverse/reflection-limits.md
-// ============================================================================
 #pragma once
 
 #include "payload/game/ue/NamePool.h"

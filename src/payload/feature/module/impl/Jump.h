@@ -1,9 +1,3 @@
-// ============================================================================
-//  Jump.h — 大跳模块
-//
-//  改 UCharacterMovementComponent::JumpZVelocity。高度与初速度的平方成正比,
-//  所以 N 倍初速度约为 N² 倍高度。原理与边界见 docs/features/speed-jump.md。
-// ============================================================================
 #pragma once
 
 #include "payload/feature/module/Module.h"

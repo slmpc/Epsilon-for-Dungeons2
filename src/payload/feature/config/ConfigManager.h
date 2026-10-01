@@ -1,14 +1,3 @@
-// ============================================================================
-//  ConfigManager.h — 配置持久化。
-//
-//  文件布局(根目录默认 ~/.epsilon/ext/dungeons2, 可用环境变量
-//  EPSILON_CONFIG_DIR 覆盖):
-//      active-config.txt              当前生效的配置名(纯文本单行)
-//      configs/<配置名>/modules/<模块名>.json
-//
-//  纯框架: 只认识 ModuleManager 里的模块, 不认识任何具体模块。
-//  与 Java 版的差异、按模块拆文件的理由见 docs/features/module-framework.md
-// ============================================================================
 #pragma once
 
 #include "payload/feature/module/ModuleManager.h"

@@ -1,8 +1,3 @@
-// ============================================================================
-//  ObjectArray.h — FUObjectArray (GObjects) 遍历
-//
-//  布局与自洽校验的依据: docs/offsets/object-array.md
-// ============================================================================
 #pragma once
 
 #include "payload/game/ue/NamePool.h"

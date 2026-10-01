@@ -96,6 +96,14 @@ private:
     // 用于验证模块是否真的生效(以及生效前后的对照)。
     void cmdMovement();
 
+    // 把一段内存按 float 解读后打印。排查"这个字段到底是速度还是别的"时,
+    // 十六进制没法和游戏里的数值对上, 必须看成浮点。
+    void dumpFloats(uint64_t addr, int count);
+
+    // 手工写一个移动属性: mvset <字段名> <数值>
+    // 用于在面板之外做对照测试(面板要开模块才写, 这里直接写)。
+    void setMovementValue(std::string_view field, float value);
+
     // ---- 帧钩子 ----
     void cmdHooks();          // 显示状态
     void cmdHookInstall();   // 显式安装

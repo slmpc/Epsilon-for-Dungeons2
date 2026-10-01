@@ -30,6 +30,7 @@ constexpr char sinkMaxWalkSpeed[]   = "MaxWalkSpeed";
 
 constexpr int32_t warningIntervalMs = 4000;
 uint64_t gLastWarnMs = 0;
+uint64_t gLastRewriteNoteMs = 0;
 
 } // namespace
 
@@ -186,6 +187,17 @@ void SpeedModule::applyIfNeeded(bool force) {
 
     if (writeSink(activeSink_, target)) {
         lastApplied_ = target;
+        // 节流记录: 只在"每次都在重写"时提示 —— 那说明游戏自己在覆盖这个字段,
+        // 靠每帧补写是压不住的(实测表现: 面板上的数值在闪, 角色却没变快)。
+        // 这种时候正确的做法是挂钩游戏自己的读取/计算路径, 而不是加倍努力地写。
+        const uint64_t now = ::GetTickCount64();
+        if (now - gLastRewriteNoteMs > 3000) {
+            gLastRewriteNoteMs = now;
+            logWarn(fmt("[Speed] 持续重写 {} (读到 {:.3f} -> 写入 {:.3f}) —— "
+                        "该字段疑似每帧被游戏重置, 每帧补写无法稳定生效",
+                        activeSink_ == Sink::gameMultiplier ? sinkGameMultiplier : sinkMaxWalkSpeed,
+                        current, target));
+        }
     } else {
         const uint64_t now = ::GetTickCount64();
         if (now - gLastWarnMs > static_cast<uint64_t>(warningIntervalMs)) {

@@ -19,6 +19,7 @@
 #include <windows.h>     // WideCharToMultiByte / CP_UTF8
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <format>
 
@@ -184,6 +185,26 @@ bool CommandServer::execute(std::string_view line) {
         else findPropertyDirect(rest[0], rest[1]);
     }
     else if (cmd == "mv" || cmd == "movement") { cmdMovement(); }
+    else if (cmd == "floats" || cmd == "f") {
+        // floats <地址> [个数] —— 按 float 解读一段内存
+        if (rest.empty()) { emitLine("用法: floats <地址> [个数]"); }
+        else {
+            uint64_t a = 0;
+            try { a = std::stoull(rest[0], nullptr, 0); } catch (...) {}
+            if (a) dumpFloats(a, static_cast<int>(optInt(rest, "n").value_or(16)));
+            else emitLine("地址解析失败");
+        }
+    }
+    else if (cmd == "mvset") {
+        // mvset <字段名> <数值>
+        if (rest.size() < 2) { emitLine("用法: mvset <字段名> <数值>"); }
+        else {
+            try {
+                const float v = std::stof(rest[1]);
+                setMovementValue(rest[0], v);
+            } catch (...) { emitLine("数值解析失败"); }
+        }
+    }
     else if (cmd == "scanlevel") {
         // scanlevel <ULevel 地址> —— 在对象上找 TArray 形态的 Actors
         if (rest.empty()) { emitLine("用法: scanlevel <ULevel 地址>"); }
@@ -687,6 +708,85 @@ void CommandServer::cmdMovement() {
     show("AirControl",       o.airControl);
     show("MaxAcceleration",  o.maxAcceleration);
     show("MovementSpeedMultiplier", o.speedMultiplier);
+}
+
+// ---------------------------------------------------------------------------
+//  dumpFloats — 按 float 解读一段内存
+//
+//  排查"某个偏移上到底是速度、倒数、还是别的"时光看十六进制没用 ——
+//  100.0f 是 0x42C80000, 和游戏里显示的 100 对不上眼。这里直接按浮点打印。
+// ---------------------------------------------------------------------------
+void CommandServer::dumpFloats(uint64_t addr, int count) {
+    if (!addr) return;
+    if (count <= 0) count = 16;
+    if (count > 64) count = 64;
+
+    emitFmt("=== {} 起 {} 个 float ===", hex(addr, 16), count);
+    emitLine("    offset      float            hex");
+    emitLine("    " + std::string(40, '-'));
+    for (int i = 0; i < count; ++i) {
+        float v = 0.0f;
+        if (!safeRead(&v, reinterpret_cast<const void*>(addr + static_cast<uint64_t>(i) * 4),
+                      sizeof(v))) {
+            emitLine("    (read failed)");
+            break;
+        }
+        uint32_t raw = 0;
+        std::memcpy(&raw, &v, 4);
+        emitFmt("    +{:#06x}   {:>14.4f}   {:#010x}", i * 4, v, raw);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  setMovementValue — 手工写一个移动属性
+//
+//  与面板里开模块的区别: 这里是一次性直写, 不做"每帧补写"。
+//  两个用途:
+//    1. 对照测试 —— 直写一次看游戏是保留还是立刻覆盖, 立刻就能区分
+//       "写不进去" 与 "写进去被覆盖"
+//    2. 验证偏移 —— 改完值看游戏内表现是否变化
+// ---------------------------------------------------------------------------
+void CommandServer::setMovementValue(std::string_view field, float value) {
+    auto& mv = feature::movement();
+    if (!mv.ready()) {
+        emitFmt("movement not resolved: {}", mv.lastError());
+        return;
+    }
+
+    int32_t off = 0;
+    // 支持直接给原始偏移(以 '+' 或 '0x' 开头) —— 排查阶段经常需要在已知字段
+    // 周围的槽上做对照写入(例如怀疑真正的值落在相邻 4 字节上)。只按名字写死
+    // 就没法做这种测试了。
+    if (!field.empty() && (field[0] == '+' || field[0] == '0')) {
+        try { off = static_cast<int32_t>(std::stoll(std::string(field), nullptr, 0)); }
+        catch (...) { off = 0; }
+    }
+    if (!off) {
+        if (iequals(field, "MaxWalkSpeed"))         off = mv.offsets().maxWalkSpeed;
+        else if (iequals(field, "JumpZVelocity"))   off = mv.offsets().jumpZVelocity;
+        else if (iequals(field, "MaxAcceleration")) off = mv.offsets().maxAcceleration;
+        else if (iequals(field, "AirControl"))      off = mv.offsets().airControl;
+        else if (iequals(field, "GravityScale"))    off = mv.offsets().gravityScale;
+    }
+    if (!off) {
+        emitLine("unknown field. use a name (MaxWalkSpeed / JumpZVelocity / "
+                 "MaxAcceleration / AirControl / GravityScale) or a raw offset (+0x230)");
+        return;
+    }
+
+    auto before = mv.readFloat(off);
+    const bool ok = mv.writeFloat(off, value);
+    ::Sleep(50);                        // 给游戏一帧时间去覆盖(如果它会覆盖)
+    auto after = mv.readFloat(off);
+
+    emitFmt("{} @ {} : {} -> {}  (write {})",
+             field, fmt("+{:#x}", off),
+             before ? fmt("{:.3f}", *before) : std::string("?"),
+             after  ? fmt("{:.3f}", *after)  : std::string("?"),
+             ok ? "ok" : "FAILED");
+    if (after && std::fabs(*after - value) > 0.01f) {
+        emitLine("  note: value did not stick 50ms after write -> the game overwrites it");
+    }
 }
 
 // ---------------------------------------------------------------------------

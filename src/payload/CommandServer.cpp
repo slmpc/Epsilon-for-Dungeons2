@@ -549,21 +549,68 @@ void CommandServer::dumpStructPointerSlots(uint64_t structObj) {
 
     // 只对第一个类自动做 FField 名字偏移探测。
     // 属性链读不出来的原因只剩两种: 链起点偏移错, 或 NamePrivate 偏移错。
-    // 上面已经把"哪些槽可能是指针"列出来了, 这里再自动挑一个候选做名字偏移
-    // 探测, 一次命令就能把两个偏移都定下来, 省掉一轮人工搬运地址。
+    //
+    // ⚠️ 候选不能瞎挑。实测教训: 我先按"值在模块映像范围外"挑第一个槽, 结果
+    // 选中了 +0x20 —— 那里存的是**类的包名指针**(解出 "/Script/Dungeons"),
+    // 于是名字偏移探测完全跑偏。
+    //
+    // 更好的判据是"这个指针像不像 FField": 在它身上试各个候选名字偏移,
+    // 看能解出多少个**合法的 FName**。真实的 FField 在正确偏移上会稳定给出
+    // 一个名字; 包名指针之类只会在某个偏移偶然命中一次。
     if (plausible > 0 && fieldProbeBudget_ > 0) {
         --fieldProbeBudget_;
-        // 挑第一个"值是用户态指针且不在本模块镜像范围内"的槽 ——
-        // FField 是堆对象, 不会落在 Shipping.exe 的映像区间里。
-        for (uint32_t off = 0x20; off <= 0x98; off += 8) {
-            uint64_t v = 0;
-            if (!safeRead(&v, reinterpret_cast<const void*>(structObj + off), 8)) continue;
-            if (v < 0x10000 || v > 0x7FFFFFFFFFFF) continue;
-            if (v >= eng_.moduleBase() && v < eng_.moduleBase() + eng_.moduleSize()) continue;
+
+        uint32_t bestSlot = 0;
+        uint32_t bestOff = 0;
+        uint64_t bestAddr = 0;
+        std::string bestName;
+        int bestScore = 0;
+
+        for (uint32_t slot = 0x20; slot <= 0x98; slot += 8) {
+            uint64_t cand = 0;
+            if (!safeRead(&cand, reinterpret_cast<const void*>(structObj + slot), 8)) continue;
+            if (cand < 0x10000 || cand > 0x7FFFFFFFFFFF) continue;
+            // FField 是堆对象, 不会落在 Shipping.exe 的映像区间里。
+            if (cand >= eng_.moduleBase() && cand < eng_.moduleBase() + eng_.moduleSize()) continue;
+
+            // 在候选地址上试各个名字偏移, 统计能解出合法名字的个数。
+            // 真正的 FField 只会在**一个**偏移上给出名字, 所以这里看的是
+            // "有没有解出名字", 而不是"解出几个"。为区分真假, 额外要求解出的
+            // 名字不是明显的基础设施串(包名/路径)。
+            for (uint32_t off = 0x18; off <= 0x48; off += 4) {
+                int32_t idx = 0;
+                if (!safeRead(&idx, reinterpret_cast<const void*>(cand + off), 4)) continue;
+                if (idx <= 0) continue;
+                const std::string nm = eng_.names().resolve(idx);
+                if (nm.empty()) continue;
+                if (nm.find('/') != std::string::npos) continue;   // 路径/包名, 不是字段名
+
+                // 打分: 名字看起来像字段名(标识符形态)的优先。
+                int score = 1;
+                const bool looksIdentifier =
+                    !nm.empty() && std::isalpha(static_cast<unsigned char>(nm[0]));
+                if (looksIdentifier) score += 3;
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestSlot = slot;
+                    bestOff = off;
+                    bestAddr = cand;
+                    bestName = nm;
+                }
+            }
+        }
+
+        if (bestScore > 0) {
             emitLine("");
-            emitFmt("      [自动探测] 拿 +{:#x} 的候选 {} 试名字偏移:", off, hex(v, 16));
-            probeFFieldNameOffset(v);
-            break;
+            emitFmt("      [自动探测] 最佳候选: 槽 +{:#x} -> {} , 名字偏移 +{:#x}",
+                     bestSlot, hex(bestAddr, 16), bestOff);
+            emitFmt("                 解出 \"{}\" (评分 {})", sanitize(bestName, 40), bestScore);
+            emitLine("      -> 若这个名字是该类的某个真实属性名, 这两个偏移就都定下来了:");
+            emitFmt("         FField::NamePrivate = +{:#x} (当前常量是 +{:#x})",
+                     bestOff, layout.fieldName);
+        } else {
+            emitLine("");
+            emitLine("      [自动探测] 没有候选能解出像字段名的 FName —— 换个大类再试。");
         }
     }
 }

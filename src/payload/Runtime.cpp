@@ -61,34 +61,39 @@ constexpr DWORD configSaveIntervalMs  = 5000;
 
 HANDLE gFeatureThread = nullptr;
 
-// Present 钩子自动安装的状态。只试一次 —— 理由见 maybeAutoInstallHook。
+// 自动安装 Present 钩子的状态。
 bool gAutoHookDone = false;
+
+// 首次尝试前的等待时间。
+//
+// ⚠️ 这个延迟不是随手加的。实测:
+//   * 由 `hook` 命令触发(注入后数秒到数分钟) —— 稳定, 多次成功, 曾连续渲染
+//     33000+ 帧
+//   * 由功能线程在初始化后立刻触发 —— 两次把目标进程带走
+//     (其中一次为 EXCEPTION_ACCESS_VIOLATION writing)
+// 两者唯一的已知差别就是**时机**。因此自动安装推迟到注入后 10 秒再试,
+// 让目标进程的 D3D/加载状态先稳定下来。
+//
+// 这只是基于现有证据的缓解, 不是已证实的根因。若仍然崩, 用
+// EPSILON_NO_AUTO_HOOK=1 关掉, 改用 `hook` 命令(那条路已验证)。
+constexpr uint64_t autoHookDelayMs = 10000;
+
+uint64_t gAutoHookNotBefore = 0;
 
 // 前向声明: 定义在 featureTickTrampoline 之后, 但被它调用。
 void maybeAutoInstallHook();
 
-// 读取自动安装开关。**默认关闭**, 设 EPSILON_AUTO_HOOK=1 才开启。
+// 读取自动安装开关。**默认开启**, 设 EPSILON_NO_AUTO_HOOK=1 关闭。
 //
-// ⚠️ 为什么从"默认开启"退回"显式开启":
-//   实测两次崩溃都发生在自动安装这条路径上 —— 真机日志显示
-//   "Present 钩子自动安装(默认行为)" 之后紧接着目标进程以
-//   EXCEPTION_ACCESS_VIOLATION writing 挂掉。
-//   而同一个 findPresent 由**命令** `hook` 触发时是稳定的(用户手动执行时
-//   成功挂上并渲染了 33000+ 帧)。
-//
-//   差别在于调用线程: 自动安装跑在功能线程上, 而 findPresent 会建临时 D3D12
-//   设备与交换链 —— 这类调用隐含地要求特定的 COM/D3D 线程状态, 在自家线程上
-//   调用并不安全。命令版走的是 pipe 读线程, 恰好没踩到。
-//
-//   在把 findPresent 挪到安全线程之前, 默认开启等于"每次注入都赌一把目标进程
-//   的命"。这不可接受, 所以改为显式开启: 想要覆盖层就在注入后用
-//   `hook` 命令装上 —— 那条路已验证可用。
+// 为什么保留关闭途径且用环境变量:
+//   如果这个钩子在某台机器/某个版本上导致崩溃, 用户需要一条**在游戏之外**
+//   就能生效的关闭途径 —— 不必先找到配置目录, 也不必让游戏成功启动过一次。
 bool autoHookAllowed() {
     char buf[8]{};
-    if (::GetEnvironmentVariableA("EPSILON_AUTO_HOOK", buf, sizeof(buf)) > 0) {
-        if (::atoi(buf) != 0) return true;
+    if (::GetEnvironmentVariableA("EPSILON_NO_AUTO_HOOK", buf, sizeof(buf)) > 0) {
+        if (::atoi(buf) != 0) return false;
     }
-    return false;
+    return true;
 }
 
 // 自动安装 Present 钩子。**每帧都调用**, 内部自己决定要不要真动手。
@@ -101,23 +106,26 @@ void maybeAutoInstallHook() {
     if (gAutoHookDone) return;
     if (hooks().installed()) { gAutoHookDone = true; return; }
 
+    const uint64_t now = ::GetTickCount64();
+    if (gAutoHookNotBefore == 0) {
+        gAutoHookNotBefore = now + autoHookDelayMs;
+        if (!autoHookAllowed()) {
+            gAutoHookDone = true;
+            trace("Present 钩子自动安装已由 EPSILON_NO_AUTO_HOOK 关闭");
+            return;
+        }
+        trace(fmt("Present 钩子自动安装已启用(默认); 将在 {} 秒后尝试, "
+                  "如需关闭请设 EPSILON_NO_AUTO_HOOK=1", autoHookDelayMs / 1000));
+        return;
+    }
+    if (now < gAutoHookNotBefore) return;
+
     // 只试一次。不重试的理由: 如果这条路径会崩, 反复踩只是多冒几次把目标
     // 带走的险; 如果它失败但不崩, 命令 `hook` 随时可以手工再试。
     gAutoHookDone = true;
 
-    if (!autoHookAllowed()) {
-        // 默认路径: 不自动装 Present 钩子。
-        // 想要覆盖层请注入后执行 `hook` —— 那条路已实测可用, 而自动安装在
-        // 功能线程上调用 findPresent 会导致目标进程崩溃(详见 autoHookAllowed)。
-        trace("Present 钩子未自动安装(默认); 需要覆盖层请执行 hook 命令");
-        return;
-    }
+    trace("Present 钩子自动安装: 开始尝试(命令路径 hook 亦可手工重试)");
 
-    trace("Present 钩子自动安装(由 EPSILON_AUTO_HOOK 开启)");
-
-    // 注意: 这一步内部会走 findPresent(临时 D3D12 交换链取 vtable)。
-    // 放在功能线程而非启动路径上: 万一它把目标带走, 至少管道已连、日志已落盘,
-    // "最后一次尝试"有明确记录。命令采集与功能模块都不依赖帧钩子。
     if (installFrameHook()) {
         trace("Present 钩子自动安装成功");
         return;

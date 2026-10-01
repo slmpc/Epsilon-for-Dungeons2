@@ -203,6 +203,46 @@ bool CommandServer::execute(std::string_view line) {
             else emitLine("地址解析失败");
         }
     }
+    else if (cmd == "poke") {
+        // poke <绝对地址> <浮点值> —— 往任意地址写一个 float, 带回读与采样。
+        //
+        // 与 mvset 的区别: mvset 的偏移是相对已解析的移动组件的, 而
+        // GAS 属性集(ATR_Movement)是另一个对象, 只能用绝对地址。
+        if (rest.size() < 2) { emitLine("用法: poke <绝对地址> <浮点值>"); }
+        else {
+            uint64_t a = 0;
+            float v = 0.0f;
+            try { a = std::stoull(rest[0], nullptr, 0); } catch (...) {}
+            try { v = std::stof(rest[1]); } catch (...) { a = 0; }
+            if (!a) { emitLine("地址或数值解析失败"); }
+            else {
+                auto& mv = feature::movement();
+                auto before = mv.readFloatAt(a, 0);
+                const bool ok = mv.writeFloatAt(a, 0, v);
+                auto now = mv.readFloatAt(a, 0);
+                emitFmt("{} : {} -> {}   (write {})", hex(a, 16),
+                         before ? fmt("{:.4f}", *before) : std::string("?"),
+                         now ? fmt("{:.4f}", *now) : std::string("?"),
+                         ok ? "ok" : "FAILED");
+                if (now && std::fabs(*now - v) > 0.001f) {
+                    emitLine("  !! 写入未落地");
+                } else {
+                    emit("  samples: ");
+                    int reverted = 0;
+                    for (int i = 0; i < 8; ++i) {
+                        ::Sleep(40);
+                        auto s = mv.readFloatAt(a, 0);
+                        if (!s) { emit("?"); break; }
+                        emit(fmt("{:.1f} ", *s));
+                        if (std::fabs(*s - v) > 0.01f) ++reverted;
+                    }
+                    emitLine("");
+                    if (reverted == 0) emitLine("  -> 保住了");
+                    else emitFmt("  -> 被改回 {}/8 次", reverted);
+                }
+            }
+        }
+    }
     else if (cmd == "mvset") {
         // mvset <字段名> <数值>
         if (rest.size() < 2) { emitLine("用法: mvset <字段名> <数值>"); }
@@ -811,6 +851,43 @@ void CommandServer::cmdAttributeMovement() {
     // 对第一个命中做一次实测: 写倍率并观察是否保持。
     if (!hits.empty()) {
         const uint64_t target = hits.front().addr;
+
+        // ---- 先把整个属性块按 float 打出来 ----
+        // 光看单个属性没用 —— 得先看清这一片里哪些槽像"倍率"(1.0)、
+        // 哪些像"速度量级"(几百)、哪些是 0。属性之间间隔 0x10。
+        emitLine("");
+        emitFmt("=== {} 的属性块 (+0x70 起 80 个 float) ===", hex(target, 16));
+        emitLine("    off      float0      float1  |  按属性对齐(+0x90/+0xa0/...)");
+        emitLine("    " + std::string(66, '-'));
+        for (int i = 0; i < 80; i += 2) {
+            const int32_t off = 0x70 + i * 4;
+            auto v0 = mvm.readFloatAt(target, off);
+            auto v1 = mvm.readFloatAt(target, off + 4);
+            if (!v0) break;
+            // 每 0x10 对齐处标出属性名(若有)
+            const char* tag = "";
+            switch (off) {
+                case 0x90:  tag = "  <- MovementSpeedMultiplier"; break;
+                case 0xa0:  tag = "  <- MovementFriction"; break;
+                case 0xb0:  tag = "  <- MovementFrictionMultiplier"; break;
+                case 0xc0:  tag = "  <- MovementRotation"; break;
+                case 0xd0:  tag = "  <- MovementRotationMultiplier"; break;
+                case 0xe0:  tag = "  <- MovementGravity"; break;
+                case 0xf0:  tag = "  <- GravityScale"; break;
+                case 0x100: tag = "  <- AirControl"; break;
+                case 0x110: tag = "  <- RollCooldown"; break;
+                case 0x130: tag = "  <- RollCharges"; break;
+                case 0x160: tag = "  <- Mass"; break;
+                case 0x170: tag = "  <- InteractionRange"; break;
+                default: break;
+            }
+            emitFmt("    +{:#06x}  {:>10}  {:>10}{}",
+                     off,
+                     fmt("{:.4f}", *v0),
+                     v1 ? fmt("{:.4f}", *v1) : std::string("?"),
+                     tag);
+        }
+
         emitLine("");
         emitFmt("=== 在 {} 上试写 MovementSpeedMultiplier(+0x90) ===", hex(target, 16));
         auto before = mvm.readFloatAt(target, 0x90);

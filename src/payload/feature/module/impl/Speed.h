@@ -46,7 +46,9 @@ public:
 
 private:
     // 施加目标。名字直接落盘, 便于人工改配置。
-    enum class Sink { gameMultiplier, maxWalkSpeed };
+    // 三个可选目标。movementAttribute 是唯一真正生效的(见 Speed.cpp 的注释),
+    // 另两个保留用于对照排查。
+    enum class Sink { gameMultiplier, maxWalkSpeed, movementAttribute };
 
     [[nodiscard]] Sink currentSink() const;
     // 取当前目标对应的属性偏移(0 表示不可用)。
@@ -57,6 +59,9 @@ private:
 
     void applyIfNeeded(bool force);
     void captureBaseline(Sink sink);
+
+    // 目标 → 落盘/显示名。
+    [[nodiscard]] static const char* sinkLabel(Sink s);
 
     // 上一次实际使用的目标。目标切换时必须重取基线, 否则会拿
     // MaxWalkSpeed 的基线去乘倍率写进 SpeedMultiplier。

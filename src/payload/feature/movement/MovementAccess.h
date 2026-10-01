@@ -46,8 +46,23 @@ struct MovementOffsets {
     // 游戏自己的速度倍率(存在则优先用它, 因为它是被复制的权威字段)
     int32_t speedMultiplier = 0;
 
+    // ---- GAS 属性集 ATR_Movement 里的偏移 ★ ----
+    //
+    // 实测这两个才是真正驱动移动速度的字段: 原本都是 700.0, 改成 3000 后
+    // 游戏内移动明显变快, 且写入**持久**(不像组件上的 MaxWalkSpeed 会被重算)。
+    // 它们是 FGameplayAttributeData 的 {BaseValue, CurrentValue} 一对, 两个都要写。
+    //
+    // 偏移来源: 代码生成参数表(0x14a069800 区段)。注意那张表读出的是 +0x90,
+    // **实际数据在 +0x98** —— 表偏移整体差 8 字节, 由相邻校验定下来的
+    // (表里 GravityScale 标 +0xf0, 而 +0xf8 处正是 1.2 这样一个合理的重力倍率)。
+    int32_t speedAttributeBase = 0;     // ATR_Movement + 0x98
+    int32_t speedAttributeCurrent = 0;  // ATR_Movement + 0x9c
+
     [[nodiscard]] bool hasCore() const noexcept {
         return maxWalkSpeed > 0 && jumpZVelocity > 0;
+    }
+    [[nodiscard]] bool hasSpeedAttribute() const noexcept {
+        return speedAttributeBase > 0;
     }
     // 人类可读的解析结果, 供 UI/命令输出。
     [[nodiscard]] std::string describe() const;
@@ -61,6 +76,14 @@ struct MovementTarget {
     std::string pawnClass;      // 玩家类名(如 PlayerCharacter_C)
     std::string movementClassName;  // 移动组件的类名(实测游戏有自己的子类)
     bool     resolved = false;
+
+    // ---- 玩家的 GAS 移动属性集(ATR_Movement) ----
+    //
+    // ★ 真正该改的东西在这里, 不在移动组件上。
+    //   组件上的 MaxWalkSpeed 每帧被游戏从属性重算, 写它必然被覆盖(实测写入后
+    //   40ms 内就被改回); 而属性集里的字段写进去是**持久**的。
+    uint64_t attributeSet = 0;          // ATR_Movement* —— 属于本玩家的那一个
+    std::string attributeSetClassName;  // 一般是 "ATR_Movement"
 };
 
 // 解析器。持有上一帧的解析结果, 避免每帧都做全量扫描。
@@ -93,6 +116,13 @@ public:
     [[nodiscard]] std::optional<float> readFloatAt(uint64_t addr, int32_t offset) const;
     bool writeFloatAt(uint64_t addr, int32_t offset, float value) const;
 
+    // ---- 移动速度属性(真正生效的那一对) --------------------------------
+    // 读/写 ATR_Movement 上的 MovementSpeed 属性。
+    // writeMovementSpeed 会**同时写 Base 和 Current** —— 只写其一的话, GAS
+    // 在下次聚合时可能用另一个值把它盖回去。
+    [[nodiscard]] std::optional<float> readMovementSpeed() const;
+    bool writeMovementSpeed(float value) const;
+
     // 便捷访问。属性偏移缺失时返回 nullopt / false。
     [[nodiscard]] std::optional<float> maxWalkSpeed() const;
     [[nodiscard]] std::optional<float> jumpZVelocity() const;
@@ -110,6 +140,7 @@ public:
 private:
     bool resolveOffsets(ue::Engine& engine);
     bool resolveTarget(ue::Engine& engine);
+    bool resolveAttributeSet(ue::Engine& engine);
     [[nodiscard]] uint64_t findLocalPlayerPawn(ue::Engine& engine) const;
 
     MovementTarget  target_{};

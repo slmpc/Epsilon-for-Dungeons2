@@ -22,6 +22,9 @@ using namespace epsilon::ue;
 
 namespace {
 
+using epsilon::payload::logInfo;
+using epsilon::payload::logWarn;
+
 // 解析节流: 失败时多久重试一次。玩家读图/重生期间解析必然失败, 每帧重试会让
 // 帧时间抖, 但退避太久又会出现"回到关卡后好几秒才生效"。
 constexpr uint64_t retryIntervalMs = 1500;
@@ -249,6 +252,16 @@ bool PlayerMovement::resolveTarget(Engine& engine) {
     target_.movementClass = engine.objects().classOf(movement);
     target_.movementClassName = engine.objects().classNameOf(movement);
     target_.resolved = true;
+
+    // 顺手把玩家的属性集找出来。找不到不算失败 —— 组件的偏移仍然可用,
+    // 只是不能走"改属性"这条真正生效的路。
+    target_.attributeSet = 0;
+    if (resolveAttributeSet(engine)) {
+        logInfo(fmt("[Movement] 玩家属性集: {} @ {}",
+                    target_.attributeSetClassName, hex(target_.attributeSet, 16)));
+    } else {
+        logWarn("[Movement] 没找到属于玩家的 ATR_Movement, 只能退回到写组件字段");
+    }
     return true;
 }
 
@@ -304,6 +317,10 @@ bool PlayerMovement::resolveOffsets(Engine& engine) {
     fill(o.gravityScale,    "GravityScale");
     fill(o.airControl,      "AirControl");
     fill(o.maxAcceleration, "MaxAcceleration");
+    // ---- GAS 属性集 ATR_Movement 的偏移(固定值, 已实测验证) ----
+    // 这两个才是真正驱动移动速度的字段, 见 MovementAccess.h 里的说明。
+    o.speedAttributeBase    = 0x98;   // MovementSpeed::BaseValue
+    o.speedAttributeCurrent = 0x9c;   // MovementSpeed::CurrentValue
     // MovementSpeedMultiplier 不在已知表里(它不属于 UCharacterMovementComponent,
     // 实测其参数项算出的偏移小于基类大小, 判定为其它类的属性, 不可采信)。
     // Speed 模块因此固定作用在 MaxWalkSpeed 上。
@@ -350,6 +367,55 @@ uint64_t PlayerMovement::findLocalPlayerPawn(Engine& engine) const {
 // ===========================================================================
 //  读写
 // ===========================================================================
+std::optional<float> PlayerMovement::readMovementSpeed() const {
+    if (!target_.attributeSet || !offsets_.speedAttributeBase) return std::nullopt;
+    return readFloatAt(target_.attributeSet, offsets_.speedAttributeBase);
+}
+
+bool PlayerMovement::writeMovementSpeed(float value) const {
+    if (!target_.attributeSet) return false;
+    // Base 与 Current 都要写。两者是 FGameplayAttributeData 的一对, GAS 聚合时
+    // 若只改了一个, 另一个可能把它盖回去 —— 实测两个一起写才能稳定生效。
+    bool ok = false;
+    if (offsets_.speedAttributeBase) {
+        ok |= writeFloatAt(target_.attributeSet, offsets_.speedAttributeBase, value);
+    }
+    if (offsets_.speedAttributeCurrent) {
+        ok |= writeFloatAt(target_.attributeSet, offsets_.speedAttributeCurrent, value);
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------
+//  找玩家自己的 ATR_Movement
+//
+//  场景里 ATR_Movement 实例有几十个(玩家 + 各种敌人/NPC), 必须挑出属于玩家的。
+//  判别方式: 属性集挂在 AbilitySystemComponent 上, ASC 又挂在 pawn(或
+//  PlayerState)上, 所以沿 Outer 链往上走一定能撞到玩家 pawn —— 实测深度 1。
+//
+//  每次全量扫 GObjects 来挑是有成本的(十万级对象), 所以只在解析目标时做一次,
+//  结果缓存在 target_.attributeSet 里。
+bool PlayerMovement::resolveAttributeSet(ue::Engine& engine) {
+    if (!target_.pawn) return false;
+
+    uint64_t found = 0;
+    engine.objects().for_each([&](ObjectStat const& st) {
+        if (st.className != "ATR_Movement") return true;
+        uint64_t o = st.address;
+        for (int depth = 1; depth <= 8; ++depth) {
+            o = engine.objects().outerOf(o);
+            if (!o) break;
+            if (o == target_.pawn) { found = st.address; return false; }
+        }
+        return true;
+    });
+
+    if (!found) return false;
+    target_.attributeSet = found;
+    target_.attributeSetClassName = engine.objects().classNameOf(found);
+    return true;
+}
+
 std::optional<float> PlayerMovement::readFloatAt(uint64_t addr, int32_t offset) const {
     if (!addr) return std::nullopt;
     float v = 0.0f;

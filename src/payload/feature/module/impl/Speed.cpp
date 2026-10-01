@@ -24,9 +24,11 @@ using epsilon::payload::logWarn;
 // 而是"送死", 所以卡在这个量级。
 constexpr double maxMultiplier = 10.0;
 
-// 两个目标的落盘名(与 EnumSetting 的候选名一致)。
+// 三个目标的落盘名(与 EnumSetting 的候选名一致)。
 constexpr char sinkGameMultiplier[] = "SpeedMultiplier";
 constexpr char sinkMaxWalkSpeed[]   = "MaxWalkSpeed";
+// ★ 真正生效的那个: ATR_Movement 属性集里的 MovementSpeed 属性。
+constexpr char sinkAttribute[]      = "MovementAttribute";
 
 constexpr int32_t warningIntervalMs = 4000;
 uint64_t gLastWarnMs = 0;
@@ -34,20 +36,40 @@ uint64_t gLastRewriteNoteMs = 0;
 
 } // namespace
 
+// 目标 → 落盘/显示名。写成成员函数而不是散落的三元表达式 —— 之前目标只有两个时
+// 三处各写了一遍 `a ? x : y`, 加第三个目标时那种写法必然漏掉其中一处。
+const char* SpeedModule::sinkLabel(Sink s) {
+    switch (s) {
+        case Sink::movementAttribute: return sinkAttribute;
+        case Sink::maxWalkSpeed:      return sinkMaxWalkSpeed;
+        case Sink::gameMultiplier:
+        default:                      return sinkGameMultiplier;
+    }
+}
+
+
 SpeedModule::SpeedModule()
     : Module("Speed", Category::player, "Movement speed multiplier") {
     // 说明文案统一纯 ASCII, 理由同 JumpModule 的构造函数注释。
-    // 默认作用在 MaxWalkSpeed 上。
     //
-    // 原本默认选 MovementSpeedMultiplier(游戏自己的复制倍率), 但实测在这个构建上
-    // 定位不可靠: 它不在 UCharacterMovementComponent 的代码生成属性表里, 按其
-    // 参数项反推出的偏移(0x90)又小于基类大小(4048), 判定为其它类的属性。
-    // 而 MaxWalkSpeed 的偏移是从属性表里**读出来的常量**(+0x234), 确定可用。
-    auto& s = addEnum("ApplyTo", {sinkMaxWalkSpeed, sinkGameMultiplier}, sinkMaxWalkSpeed,
-                      "Which field to scale (MaxWalkSpeed is verified on this build)");
+    // ★ 默认(也是唯一真正有效的)目标是 **GAS 属性集里的 MovementSpeed 属性**。
+    //
+    //   走过的弯路, 记下来免得再犯:
+    //     * 写组件的 MaxWalkSpeed(+0x234): 每帧被游戏从属性重算, 必然被覆盖
+    //     * 写属性集 +0x90: 能写能保持, 但那是**空槽位**(原本是 0), 无效
+    //     * 写属性集 +0x98/+0x9c: 原本是 700.0, 改成 3000 后**游戏内明显变快**
+    //
+    //   属性表读出的偏移整体差 8 字节(表里标 +0x90, 实际在 +0x98) —— 靠相邻校验
+    //   定下来的: 表里 GravityScale 标 +0xf0, 而 +0xf8 处正是 1.2 这样一个合理的
+    //   重力倍率。另两个选项保留下来只为对照排查, 不要作为默认。
+    auto& s = addEnum("ApplyTo",
+                      {sinkAttribute, sinkMaxWalkSpeed, sinkGameMultiplier},
+                      sinkAttribute,
+                      "Which field to scale. MovementAttribute is the one that "
+                      "actually works on this build");
     sink_ = &s;
 
-    auto& m = addDouble("Multiplier", 1.8, 0.1, maxMultiplier, 0.1, "Speed multiplier");
+    auto& m = addDouble("Multiplier", 1.5, 0.1, maxMultiplier, 0.1, "Speed multiplier");
     multiplier_ = &m;
 
     auto& n = addBool("Notify", false, "Print resolution details once on enable");
@@ -59,17 +81,26 @@ SpeedModule::SpeedModule()
 }
 
 SpeedModule::Sink SpeedModule::currentSink() const {
-    if (sink_ && sink_->is(sinkMaxWalkSpeed)) return Sink::maxWalkSpeed;
+    if (sink_ && sink_->is(sinkAttribute))      return Sink::movementAttribute;
+    if (sink_ && sink_->is(sinkMaxWalkSpeed))   return Sink::maxWalkSpeed;
     return Sink::gameMultiplier;
 }
 
 int32_t SpeedModule::sinkOffset(Sink sink) const {
     auto const& offs = movement().offsets();
     if (sink == Sink::gameMultiplier) return offs.speedMultiplier;
+    if (sink == Sink::movementAttribute) return offs.speedAttributeBase;
     return offs.maxWalkSpeed;
 }
 
 bool SpeedModule::readSink(Sink sink, float& out) const {
+    // 属性集那条路要走自己的读写接口(目标是 ATR_Movement, 不是移动组件)。
+    if (sink == Sink::movementAttribute) {
+        auto v = movement().readMovementSpeed();
+        if (!v) return false;
+        out = *v;
+        return true;
+    }
     const int32_t off = sinkOffset(sink);
     if (!off) return false;
     auto v = movement().readFloat(off);
@@ -79,6 +110,11 @@ bool SpeedModule::readSink(Sink sink, float& out) const {
 }
 
 bool SpeedModule::writeSink(Sink sink, float value) const {
+    // 属性集那条路: 必须走 writeMovementSpeed —— 它会把 Base 与 Current 一起写,
+    // 只写一个的话 GAS 聚合时可能被另一个盖回去。
+    if (sink == Sink::movementAttribute) {
+        return movement().writeMovementSpeed(value);
+    }
     const int32_t off = sinkOffset(sink);
     if (!off) return false;
     return movement().writeFloat(off, value);
@@ -136,7 +172,7 @@ void SpeedModule::onEnable() {
     if (notify_ && notify_->value()) {
         logInfo(fmt("[Speed] 目标 {} / {} ; 施加于 {} ; 基线 = {:.3f}",
                     mv.target().pawnClass, mv.target().movementClassName,
-                    sink == Sink::gameMultiplier ? sinkGameMultiplier : sinkMaxWalkSpeed,
+                    sinkLabel(sink),
                     base_));
         logInfo(fmt("[Speed] 属性偏移 {}", mv.offsets().describe()));
     }
@@ -195,7 +231,7 @@ void SpeedModule::applyIfNeeded(bool force) {
             gLastRewriteNoteMs = now;
             logWarn(fmt("[Speed] 持续重写 {} (读到 {:.3f} -> 写入 {:.3f}) —— "
                         "该字段疑似每帧被游戏重置, 每帧补写无法稳定生效",
-                        activeSink_ == Sink::gameMultiplier ? sinkGameMultiplier : sinkMaxWalkSpeed,
+                        sinkLabel(activeSink_),
                         current, target));
         }
     } else {
@@ -214,7 +250,7 @@ std::string SpeedModule::info() const {
     const Sink s = haveActiveSink_ ? activeSink_ : currentSink();
     float cur = 0.0f;
     const bool ok = readSink(s, cur);
-    const char* name = (s == Sink::gameMultiplier) ? sinkGameMultiplier : sinkMaxWalkSpeed;
+    const char* name = sinkLabel(s);
     return ok ? fmt("{}={:.2f} x{:.1f}", name, cur,
                     multiplier_ ? multiplier_->value() : 0.0)
               : fmt("{} unavailable", name);

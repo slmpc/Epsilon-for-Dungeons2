@@ -803,11 +803,31 @@ void CommandServer::setMovementValue(std::string_view field, float value) {
     auto before = mv.readFloat(off);
     const bool ok = mv.writeFloat(off, value);
 
-    emitFmt("{} @ {} : {} -> {}  (write {})",
-             field, fmt("+{:#x}", off),
+    // ⚠️ 立刻回读, 这是关键的一步。
+    //
+    // 之前这里打印的是**我们打算写进去的值**, 而不是回读结果 —— 那导致
+    // "写入失败"与"写入成功但被游戏覆盖"两种情况在输出上**完全一样**,
+    // 我据此得出了"该字段被每帧重算"的结论, 但那其实没有被证实。
+    // 现在先做一次不睡眠的回读: 它能区分
+    //     immediate == value  -> 写进去了, 之后是被别人改回来的
+    //     immediate != value  -> 根本没写进去(地址错 / 写被丢弃)
+    auto immediate = mv.readFloat(off);
+
+    emitFmt("{} @ {} : {} -> {}", field, fmt("+{:#x}", off),
              before ? fmt("{:.3f}", *before) : std::string("?"),
-             ok ? fmt("{:.3f}", value) : std::string("FAILED"),
-             ok ? "ok" : "FAILED");
+             immediate ? fmt("{:.3f}", *immediate) : std::string("?"));
+
+    if (!ok) {
+        emitLine("    write 返回失败(内存不可写)");
+        return;
+    }
+    if (!immediate) { emitLine("    回读失败, 无法判断"); return; }
+    if (std::fabs(*immediate - value) > 0.001f) {
+        emitFmt("    !! 写入未生效: 期望 {:.3f}, 回读 {:.3f} —— 该地址写不进去 "
+                "(不是被游戏覆盖, 而是我们的写没有落地)", value, *immediate);
+        return;
+    }
+    emitLine("    写入已生效(回读一致); 下面继续观察是否被改回");
 
     // 写入后连续采样。单次 50ms 复查只能区分"立刻被覆盖", 采样多次才能看出
     // 覆盖是持续发生(每帧重算)还是偶发(某个事件触发)。

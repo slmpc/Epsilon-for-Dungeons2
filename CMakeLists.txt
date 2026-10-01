@@ -119,9 +119,17 @@ add_executable(epsilonInjector
     src/injector/Main.cpp
     src/injector/Cli.cpp
     src/injector/PipeServer.cpp
+    # 应用清单: requireAdministrator(UAC)。游戏进程完整性级别更高,
+    # 不提权 OpenProcess 直接返回 5 —— 清单让缺权限这件事在启动时就可见。
+    src/injector/epsilonInjector.manifest
 )
 target_include_directories(epsilonInjector PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/injector")
 target_link_libraries(epsilonInjector PRIVATE epsilonCommon)
+if(MSVC)
+    # 清单由上一条的 .manifest 提供; 关掉链接器自带的那一份, 否则两段
+    # requestedExecutionLevel 会在 mt.exe 合并时报 c1010001(level 值不一致)。
+    target_link_options(epsilonInjector PRIVATE "/MANIFESTUAC:NO")
+endif()
 
 # 最小 x64 控制台靶子: 不碰游戏验证整条注入链路。
 add_executable(epsilonTestTarget EXCLUDE_FROM_ALL

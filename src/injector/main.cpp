@@ -1,4 +1,4 @@
-// Main.cpp — 注入器主流程: 选目标 → 起管道 → 注入 → 等 ready → 下发命令。
+// Main.cpp — 注入器主流程: 找目标 → 起管道 → 注入 → 等 ready → 装 Present 钩子 → 交互。
 // 排查见 docs/dev/diagnostics.md。
 #include "common/PipeChannel.h"
 #include "common/ProcUtil.h"
@@ -11,11 +11,29 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 
 namespace epsilon {
 namespace {
+
+// 命令是同步执行但没有完成通知 —— 用固定小延迟等响应写完。
+constexpr DWORD commandSettleMs = 400;
+
+// 游戏进程完整性级别更高(它自己提权), 本进程若不是 High 就必然 OpenProcess 失败(5)。
+// 提前判掉: 否则会先白等一轮找进程, 最后只给一个 err=5。
+bool processElevated() {
+    HANDLE token = nullptr;
+    if (!::OpenProcessToken(::GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+
+    TOKEN_ELEVATION elevation{};
+    DWORD size = sizeof(elevation);
+    const BOOL ok = ::GetTokenInformation(token, TokenElevation, &elevation,
+                                          sizeof(elevation), &size);
+    ::CloseHandle(token);
+    return ok && elevation.TokenIsElevated != 0;
+}
 
 std::string defaultPayloadPath() {
     wchar_t buf[MAX_PATH * 4]{};
@@ -41,6 +59,22 @@ std::string payloadLogPath(uint32_t pid) {
     return fmt("{}epsilonPayload_{}.log", dir, pid);
 }
 
+// 下发一串命令, 每条之间留出响应写回的时间。
+bool runCommands(InjectorChannel& channel, std::vector<std::string> const& commands) {
+    for (auto const& c : commands) {
+        if (!channel.connected()) {
+            errLine("  管道未连接, 无法下发命令。");
+            return false;
+        }
+        if (!channel.send(c)) {
+            errLine(fmt("  下发失败: {}", c));
+            return false;
+        }
+        ::Sleep(commandSettleMs);
+    }
+    return true;
+}
+
 volatile BOOL gInterrupted = FALSE;
 
 BOOL WINAPI ctrlHandler(DWORD type) {
@@ -60,10 +94,11 @@ int main(int argc, char** argv) {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
+    consoleInit(true);
+
     auto opt = parseArgs(argc, argv);
     if (!opt) return 2;
 
-    consoleInit(true);
     setColorEnabled(!opt->noColor);
     ::SetConsoleCtrlHandler(&ctrlHandler, TRUE);
 
@@ -78,6 +113,13 @@ int main(int argc, char** argv) {
 
     uiBanner();
 
+    // -l 只是枚举进程, 不需要提权; 真注入前才拦。
+    if (!opt->listOnly && !processElevated()) {
+        errLine("  [x] 需要管理员权限 —— 游戏进程完整性级别更高, 不提权 OpenProcess 只会返回 5。");
+        outLine("      用管理员身份的终端启动; 或直接双击本 EXE(清单是 requireAdministrator, 会弹 UAC)。");
+        return 8;
+    }
+
     if (opt->listOnly) {
         cmdList(opt->filter, opt->verbose);
         return 0;
@@ -89,7 +131,7 @@ int main(int argc, char** argv) {
     outLine(fmt("  目标进程   : {} (PID {})", target->name, target->pid));
     outLine(fmt("  映像路径   : {}", target->path.empty() ? "(未知)" : target->path));
 
-    const auto modBefore = findModule(target->pid, opt->targetName);
+    const auto modBefore = findModule(target->pid, target->name);
     if (modBefore) {
         outLine(fmt("  模块基址   : {} ({} 字节)", hex(modBefore->base, 16),
                      humanBytes(modBefore->size)));
@@ -157,27 +199,30 @@ int main(int argc, char** argv) {
         outLine("      若目标进程已消失, 日志最后一行就是崩溃点。");
     }
 
+    // ---- Present 钩子: 默认就装 ----
+    // 走注入体自己的 `hook` 命令(与手工敲 hook 同一条路), 而不是等它的 10 秒自动安装,
+    // 这样"注入完就有覆盖层"。注入体退避的自动安装仍然保留 —— 手工执行注入体 DLL
+    // (不经本注入器)时它是唯一的安装途径。
     int rc = 0;
+    if (opt->hook && channel.connected()) {
+        outLine("");
+        outLine("  安装 Present 钩子 (覆盖层/面板需要)...");
+        if (!runCommands(channel, {"hook"})) rc = 7;
+    } else if (!opt->hook) {
+        outLine("");
+        outLine("  (--no-hook: 跳过 Present 钩子; 需要时可手工敲 hook)");
+    }
+
     if (!opt->commands.empty()) {
         outLine("");
-        for (auto const& c : opt->commands) {
-            if (!channel.connected()) {
-                errLine("  管道未连接, 无法下发命令。");
-                rc = 7;
-                break;
-            }
-            if (!channel.send(c)) {
-                errLine(fmt("  下发失败: {}", c));
-                rc = 7;
-                break;
-            }
-            // 命令是同步执行的但没有完成通知, 用固定小延迟等响应写完。
-            ::Sleep(400);
-        }
+        if (!runCommands(channel, opt->commands)) rc = 7;
     }
 
     if (opt->interactive && channel.connected()) {
-        if (!interactiveShell(channel.pipe())) rc = 0;
+        interactiveShell(channel.pipe());
+    } else if (opt->interactive) {
+        errLine("  管道未连接, 不进交互模式。");
+        rc = 7;
     }
 
     channel.stop();

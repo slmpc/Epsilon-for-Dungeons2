@@ -130,7 +130,7 @@ VS 自带的 vcpkg，而本项目的 baseline 与已装依赖在用户自己的 
 |---|---|---|
 | 注入体只做注入，不做卸载 | 一旦挂钩子/起线程，半途 `FreeLibrary` 会留下悬空回调，目标必崩。要清除就重启目标进程 | [lifecycle](docs/payload/lifecycle.md) |
 | 单实例守卫 | 命名互斥体保证每进程只跑一个实例；副作用是**驻留期间无法注入新构建**。换个 DLL 文件名即可并存 | [lifecycle](docs/payload/lifecycle.md) |
-| Present 钩子默认开启，延迟 10 秒 | `findPresent` 会建临时 D3D12 交换链，唯一能识别的差异是**时机**。`EPSILON_NO_AUTO_HOOK=1` 关闭（刻意放在游戏之外） | [hooks](docs/payload/hooks.md) |
+| Present 钩子默认装，且**走注入器的 `hook` 命令** | 注入器 ready 后立即下发 `hook`，不等注入体的 10 秒自动安装；注入体的自动安装保留给「手工注入 DLL」那条路。`--no-hook` 跳过，`EPSILON_NO_AUTO_HOOK=1` / `%TEMP%\epsilonPayload_no_autohook` 只关自动安装那条 | [hooks](docs/payload/hooks.md) |
 | 覆盖层交换链重建 | 必须在取后缓冲**之前**比对尺寸/后缓冲数量。忽略它会导致 GPU 侧挂死（UE 弹 `GPUCrash`）而 CPU 侧一切正常 | [overlay](docs/payload/overlay.md) |
 | 覆盖层必须用游戏的命令队列渲染 | flip 模型交换链与创建它的队列绑定；在别的队列上渲染会「命令成功、围栏完成、画面不动」 | [overlay](docs/payload/overlay.md) |
 | 内存访问必须走 `safeRead` / `safeWrite` | 目标进程里任何指针都可能是垃圾值。读走 `safeRead`（SEH 保护），写走 `safeWrite`（先直写，失败才放宽页保护） | [diagnostics](docs/dev/diagnostics.md) |
@@ -204,9 +204,15 @@ exception code / exception address / fault address，换算 RVA 后回 IDA 定�
 注入器需要**管理员权限**（游戏进程完整性级别更高，否则 `OpenProcess` 返回 `Access denied (5)`）。
 
 ```powershell
-.\build\release\bin\epsilonInjector.exe -l --filter Dungeons      # 找进程
-.\build\release\bin\epsilonInjector.exe --pid <PID> -v -i         # 注入并交互
+.\build\release\bin\epsilonInjector.exe                            # 找游戏 → 注入 → 装 Present 钩子 → 交互
+.\build\release\bin\epsilonInjector.exe -l --filter Dungeons       # 只看进程
+.\build\release\bin\epsilonInjector.exe --pid <PID> -v             # 指定 PID(仍是注入+挂钩+交互)
 ```
+
+无参数即完整流程：按映像名找 Dungeons2（找不到退回模糊匹配 `dungeons-win64`，等
+`--find-wait` 毫秒）→ 注入 → 等 ready → 下发 `hook` → 进入 `epsilon>` 交互模式。
+`--no-hook` 跳过钩子，`--no-interactive` 配 `--exec` 做批处理；交互里 `injector-help`
+看注入器本地命令（`ps` / `clear` / `exit`），其余输入原样下发给注入体。
 
 | 命令 | 作用 |
 |---|---|

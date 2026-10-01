@@ -48,7 +48,7 @@
 ## 覆盖方式
 
 ```powershell
-.\build\release\bin\epsilonInjector.exe --pid <PID> -v -i
+.\build\release\bin\epsilonInjector.exe            # 无参数即注入并进交互
 epsilon> status          # 引擎定位总览（各全局的定位方式与校验结果）
 epsilon> rescan          # 重新定位（游戏加载完成后 GObjects 才会稳定）
 ```

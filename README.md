@@ -72,11 +72,18 @@ vcpkg，而本项目 baseline 与已装依赖在用户自己的 vcpkg 里）。*
 注入器需要**管理员权限**（游戏进程完整性级别更高，否则 `OpenProcess` 返回 `Access denied (5)`）。
 
 ```powershell
-.\build\release\bin\epsilonInjector.exe -l --filter Dungeons      # 找进程
-.\build\release\bin\epsilonInjector.exe --pid <PID> -v -i         # 注入并交互
+.\build\release\bin\epsilonInjector.exe                            # 一把梭: 找游戏 → 注入 → 装 Present 钩子 → 交互
+.\build\release\bin\epsilonInjector.exe -l --filter Dungeons       # 只看进程
+.\build\release\bin\epsilonInjector.exe --pid <PID> -v             # 指定 PID, 仍然是注入+挂钩+交互
+.\build\release\bin\epsilonInjector.exe -x status --no-interactive # 只下发命令后退出
 ```
 
-进入 `epsilon>` 提示符后：
+**不带参数就是完整流程**：按映像名找运行中的 Dungeons2（找不到会退回模糊匹配
+`dungeons-win64`，并最多等 `--find-wait` 毫秒）→ `CreateRemoteThread` 注入 → 等
+注入体 ready → 下发 `hook` 装 Present 钩子（`--no-hook` 可跳过）→ 进交互模式
+（`--exec` 只在给命令时批量模式，`-i` 可强制交互）。
+
+进入 `epsilon>` 提示符后（`injector-help` 看注入器自己的命令，`ps` / `clear` / `exit`）：
 
 ```
 status     引擎定位总览            player     玩家候选与模块会选中的那个

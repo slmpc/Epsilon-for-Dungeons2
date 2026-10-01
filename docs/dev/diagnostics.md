@@ -27,9 +27,20 @@
 `Access denied (5)`。
 
 ```powershell
-.\build\release\bin\epsilonInjector.exe -l --filter Dungeons      # 找进程
-.\build\release\bin\epsilonInjector.exe --pid <PID> -v -i         # 注入并交互
+.\build\release\bin\epsilonInjector.exe                            # 找游戏 → 注入 → 装钩子 → 交互
+.\build\release\bin\epsilonInjector.exe -l --filter Dungeons       # 只看进程
+.\build\release\bin\epsilonInjector.exe --pid <PID> -v             # 指定 PID
 ```
+
+无参数时的完整流程与各开关见 [`../reverse/toolchain.md`](../reverse/toolchain.md)。
+
+### 注入器找不到游戏时看什么
+
+| 症状 | 原因 | 做法 |
+|---|---|---|
+| `找不到运行中的 Dungeons-Win64-Shipping.exe (等了 60000 毫秒)` | 游戏没启动，或者映像名与默认不符 | 先启动游戏；`--list --filter Dungeons` 看真实映像名，再用 `--name` |
+| `找到 N 个候选进程, 用 --pid 指定其中一个` | 同时跑着多个实例 / 另一个 UE 程序 | 按列出的 PID 用 `--pid` |
+| 等游戏时一直刷 `...仍在等` | 正常 —— 只是在轮询 | 不想等就给 `--find-wait 0` |
 
 ---
 

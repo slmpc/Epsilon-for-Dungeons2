@@ -11,11 +11,28 @@
 `Access denied (5)`。
 
 ```powershell
-.\build\release\bin\epsilonInjector.exe -l --filter Dungeons      # 找进程
-.\build\release\bin\epsilonInjector.exe --pid <PID> -v -i         # 注入并交互
+.\build\release\bin\epsilonInjector.exe                            # 一把梭: 找游戏 → 注入 → 装钩子 → 交互
+.\build\release\bin\epsilonInjector.exe -l --filter Dungeons       # 只看进程
+.\build\release\bin\epsilonInjector.exe --pid <PID> -v             # 指定 PID
 ```
 
-进 `epsilon>` 提示符后即可用下面的命令。
+无参数时的完整流程：
+
+| 步骤 | 行为 | 开关 |
+|---|---|---|
+| 1. 找进程 | 映像名精确匹配 `Dungeons-Win64-Shipping.exe`；没有则模糊匹配映像名含 `dungeons-win64` 的进程（排除 `Dungeons.exe` 引导器、`CrashReportClient` 等）。**最多等 `--find-wait` 毫秒**（默认 60000）等游戏启动 | `-p/--pid`、`-n/--name`、`--find-wait 0` 只查一次 |
+| 2. 注入 | `CreateRemoteThread` + `LoadLibraryW`，等注入体 ready | `-d/--dll`、`--wait <ms>` |
+| 3. 装 Present 钩子 | ready 后下发注入体命令 `hook` —— 与手工敲 `hook` 同一条路，不等注入体自己的 10 秒自动安装 | `--no-hook` 跳过 |
+| 4. 进交互 | `epsilon>` 提示符，输入原样下发给注入体 | `-x/--exec` 变成批量模式；`-i` 强制交互，`--no-interactive` 禁掉 |
+
+进 `epsilon>` 提示符后即可用下面的命令。注入器自己的命令（不下发给注入体）：
+
+| 本地命令 | 作用 |
+|---|---|
+| `injector-help` | 列出本地命令 |
+| `ps [子串]` | 列进程（注入体的 `list` 是「枚举 Actor」，所以本地这条刻意叫 `ps`） |
+| `clear` / `cls` | 清屏 |
+| `exit` / `quit` | 退出注入器（**注入体仍驻留**，不会卸载） |
 
 产物：`build/<preset>/bin/`（`epsilonInjector.exe` + `epsilonPayload.dll` 同目录）。
 

@@ -20,6 +20,35 @@ namespace {
 
 std::mutex gEmitMu;
 
+// 文件日志句柄。放在最前面: emit() 需要把命令输出镜像落盘(见 mirrorToLogFile),
+// 而 emit() 定义在这两个变量之后是不能用的 —— 所以它们必须在这里先声明。
+std::mutex gFileMu;
+HANDLE     gLogFile = INVALID_HANDLE_VALUE;
+std::string gLogPath;
+
+// 把一段文本落到文件日志。调用方需已持有 gFileMu。
+void appendToLogFileLocked(std::string_view text) {
+    if (text.empty() || gLogFile == INVALID_HANDLE_VALUE) return;
+    DWORD written = 0;
+    ::WriteFile(gLogFile, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+}
+
+// 把一条已生成的输出同时落到文件日志。
+//
+// ⚠️ 为什么需要: 命令输出原本**只**走管道。注入器一旦退出(比如 `--exec` 跑完
+// 就关), 还在路上的响应就彻底丢了 —— 排查时表现为"命令执行了但没有任何输出",
+// 让人误以为是命令本身失败。实测被这个坑掉过一轮: findprop 的输出一个字都没
+// 留下, 分不清是没命中还是根本没跑。
+//
+// 落盘之后, 无论注入器是否还在, 命令结果都能从
+//     %TEMP%\epsilonPayload_<pid>_<base>.log
+// 里读回来。这条路径不依赖任何对端存活。
+void mirrorToLogFile(std::string_view text) {
+    if (text.empty()) return;
+    std::lock_guard lk(gFileMu);
+    appendToLogFileLocked(text);
+}
+
 } // namespace
 
 Context& ctx() {
@@ -28,6 +57,9 @@ Context& ctx() {
 }
 
 void emit(std::string_view text) {
+    // 先落盘再发管道: 落盘不会失败到需要回滚, 而管道可能对端已经没了。
+    // 这样"命令有没有输出"这件事不再依赖注入器是否还活着。
+    mirrorToLogFile(text);
     std::lock_guard lk(gEmitMu);
     auto& c = ctx();
     if (c.pendingActive) {
@@ -37,7 +69,7 @@ void emit(std::string_view text) {
     if (c.sink == Sink::pipe) {
         c.pipe.send(proto::Kind::data, text);
     }
-    // Sink::none: 丢弃。绝不因为没地方写就崩 —— 文件日志仍在记录。
+    // Sink::none: 只落盘, 不送管道 —— 绝不因为没地方写就崩。
 }
 
 void emitLine(std::string_view text) {
@@ -45,6 +77,8 @@ void emitLine(std::string_view text) {
     emit("\n");
 }
 
+// 把一条已生成的输出同时落到文件日志。
+//
 bool emitNow(proto::Kind kind, std::string_view text) {
     std::lock_guard lk(gEmitMu);
     auto& c = ctx();
@@ -98,9 +132,8 @@ void logVerbose(std::string_view s) {
 // ---------------------------------------------------------------------------
 namespace {
 
-std::mutex gFileMu;
-HANDLE     gLogFile = INVALID_HANDLE_VALUE;
-std::string gLogPath;
+// gFileMu / gLogFile / gLogPath 的文件作用域声明已移到文件顶部 ——
+// emit() 需要用它们做输出镜像, 而 emit() 定义在前面。
 
 std::string makeLogPath() {
     wchar_t tmp[MAX_PATH]{};

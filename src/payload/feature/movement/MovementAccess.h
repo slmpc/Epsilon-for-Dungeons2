@@ -86,6 +86,13 @@ public:
     // 写一个 float 属性。走 safeWrite(必要时放宽页保护)。
     bool writeFloat(int32_t offset, float value) const;
 
+    // 任意地址上的 float 读写(不依赖已解析的移动组件)。
+    //
+    // 排查属性集(ATR_Movement)时用得上: 那时目标是 GAS 的属性对象, 和
+    // 移动组件不是同一个东西, 用不了上面那两个按组件取址的接口。
+    [[nodiscard]] std::optional<float> readFloatAt(uint64_t addr, int32_t offset) const;
+    bool writeFloatAt(uint64_t addr, int32_t offset, float value) const;
+
     // 便捷访问。属性偏移缺失时返回 nullopt / false。
     [[nodiscard]] std::optional<float> maxWalkSpeed() const;
     [[nodiscard]] std::optional<float> jumpZVelocity() const;

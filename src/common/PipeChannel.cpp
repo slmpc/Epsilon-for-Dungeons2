@@ -118,11 +118,41 @@ std::wstring makePipeName(std::wstring_view prefix) {
     return buf;
 }
 
-std::wstring defaultPipeName(uint32_t targetPid) {
-    wchar_t buf[64]{};
+std::wstring moduleSlotFromPath(std::wstring_view pathOrName) {
+    const size_t slash = pathOrName.find_last_of(L"\\/");
+    std::wstring_view base =
+        (slash == std::wstring_view::npos) ? pathOrName : pathOrName.substr(slash + 1);
+
+    if (base.size() > 4) {
+        const std::wstring_view ext = base.substr(base.size() - 4);
+        if (ext == L".dll" || ext == L".DLL" || ext == L".Dll") {
+            base = base.substr(0, base.size() - 4);
+        }
+    }
+
+    // 只保留字母数字: 这个名字会进管道名与互斥体名, 不引入奇怪字符。
+    std::wstring out;
+    out.reserve(base.size());
+    for (wchar_t c : base) {
+        if ((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'z') ||
+            (c >= L'A' && c <= L'Z')) {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+std::wstring defaultPipeName(uint32_t targetPid, std::wstring_view slot) {
+    wchar_t buf[160]{};
     // 前缀换过一次: 老名字 EpsilonHotInject.<pid> 在真游戏上稳定拿到
     // ACCESS_DENIED, 怀疑是名字层面的残留/冲突, 换个全新前缀排除这个变量。
-    ::swprintf_s(buf, L"EpsilonHotPipe2.%u", targetPid);
+    const std::wstring s(slot);
+    if (s.empty()) {
+        ::swprintf_s(buf, L"EpsilonHotPipe2.%u", targetPid);
+    } else {
+        // slot 已过滤为字母数字, 不存在格式化风险。
+        ::swprintf_s(buf, L"EpsilonHotPipe2.%u.%s", targetPid, s.c_str());
+    }
     return buf;
 }
 

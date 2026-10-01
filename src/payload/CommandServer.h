@@ -100,6 +100,18 @@ private:
     // 十六进制没法和游戏里的数值对上, 必须看成浮点。
     void dumpFloats(uint64_t addr, int count);
 
+    // 找出**玩家的** ATR_Movement(移动属性集)实例, 并读出其中的速度相关属性。
+    //
+    // 为什么需要它: 属性的真身不在 UCharacterMovementComponent 上, 而在
+    // GAS 的属性集 ATR_Movement 里(反汇编确认: OnRep_MovementSpeedMultiplier
+    // 的 Outer 是 Class :: ATR_Movement)。而场景里有二十多个 ATR_Movement
+    // 实例(玩家 + 各种敌人/NPC), 必须挑出属于玩家的那个。
+    //
+    // 判别方式: 沿 Outer 链往上走, 看哪一级正好是玩家 pawn。属性集挂在
+    // AbilitySystemComponent 上, ASC 又挂在 pawn 或 playerState 上,
+    // 所以链上一定能撞到玩家 pawn 或其 PlayerState。
+    void cmdAttributeMovement();
+
     // 手工写一个移动属性: mvset <字段名> <数值>
     // 用于在面板之外做对照测试(面板要开模块才写, 这里直接写)。
     void setMovementValue(std::string_view field, float value);

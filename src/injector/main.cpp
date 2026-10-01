@@ -124,12 +124,14 @@ int main(int argc, char** argv) {
     }
 
     // ---------------------------------------------------------------- 管道
-    // 约定名: 由目标 PID 推导。注入体用自己的 PID 算出同一名字, 无需传参。
+    // 约定名: 由目标 PID + 被注入 DLL 的文件名推导。注入体用同样的两样东西
+    // 算出同一名字, 无需传参。槽位带上 DLL 名, 于是不同文件名的注入体可以
+    // 并存于同一进程 —— 改完代码换个名字就能注入, 不必重启游戏。
     // 注入器**只做注入**, 不做卸载 —— 见 procUtil.h 里的说明。
     InjectorChannel channel;
     {
         std::string err;
-        if (!channel.start(target->pid, &err)) {
+        if (!channel.start(target->pid, toUtf16(dll), &err)) {
             errLine(fmt("  创建通信管道失败: {}", err));
             return 5;
         }

@@ -10,9 +10,11 @@
 
 namespace epsilon {
 
-bool InjectorChannel::start(uint32_t targetPid, std::string* error) {
-    // 约定名: 注入体用自己的 PID 算出同一个字符串, 无需任何传递。
-    name_ = defaultPipeName(targetPid);
+bool InjectorChannel::start(uint32_t targetPid, std::wstring_view dllPath, std::string* error) {
+    // 约定名: 注入体用自己的 PID 加上自己的模块文件名算出同一个字符串,
+    // 两边零传递。槽位取自已注入的 DLL 文件名。
+    const std::wstring slot = moduleSlotFromPath(dllPath);
+    name_ = defaultPipeName(targetPid, slot);
 
     // 管道名仍然写进目标环境块 —— 作为冗余通路保留。
     // (实测 GetEnvironmentVariableW 未必反映被外部改写的 PEB, 所以

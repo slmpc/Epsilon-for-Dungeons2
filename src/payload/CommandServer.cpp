@@ -185,13 +185,21 @@ bool CommandServer::execute(std::string_view line) {
         else findPropertyDirect(rest[0], rest[1]);
     }
     else if (cmd == "mv" || cmd == "movement") { cmdMovement(); }
+    else if (cmd == "attrmv" || cmd == "attrs") { cmdAttributeMovement(); }
     else if (cmd == "floats" || cmd == "f") {
         // floats <地址> [个数] —— 按 float 解读一段内存
         if (rest.empty()) { emitLine("用法: floats <地址> [个数]"); }
         else {
             uint64_t a = 0;
             try { a = std::stoull(rest[0], nullptr, 0); } catch (...) {}
-            if (a) dumpFloats(a, static_cast<int>(optInt(rest, "n").value_or(16)));
+            // 个数是**第二个位置参数**, 不是 "n=" 选项 —— 之前这里用 optInt 找
+            // 选项, 于是调用方传的位置参数被静默忽略, 永远只打 16 个。排查
+            // 属性块时正好被这个坑到: 明明要 48 个却只看到 16 个。
+            int count = 16;
+            if (rest.size() >= 2) {
+                try { count = std::stoi(rest[1]); } catch (...) {}
+            }
+            if (a) dumpFloats(a, count);
             else emitLine("地址解析失败");
         }
     }
@@ -733,6 +741,101 @@ void CommandServer::cmdMovement() {
                          v ? fmt("{:.4f}", *v) : std::string("?"));
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  cmdAttributeMovement — 找出玩家的 ATR_Movement 并读出速度属性
+//
+//  ATR_Movement 是游戏的 GAS 移动属性集, 属性偏移来自代码生成参数表
+//  (0x14a069800 区段, 每项 0x40 字节, 偏移在 +0x24):
+//      +0x90 MovementSpeedMultiplier      <- 真正该改的地方
+//      +0xa0 MovementFriction
+//      +0xb0 MovementFrictionMultiplier
+//      +0xc0 MovementRotation
+//      +0xd0 MovementRotationMultiplier
+//      +0xe0 MovementGravity
+//      +0xf0 GravityScale
+//      +0x100 AirControl
+//      +0x160 Mass
+//  属性之间间隔 0x10, 因为 FGameplayAttributeData 是 {BaseValue, CurrentValue}
+//  加上对齐 —— 所以每个属性占用 +0x00 与 +0x04 两个 float。
+// ---------------------------------------------------------------------------
+void CommandServer::cmdAttributeMovement() {
+    auto& mvm = feature::movement();
+    if (auto* eng = feature::game().engine; eng != nullptr) mvm.resolve(*eng, true);
+    else mvm.resolve(eng_, true);
+
+    const uint64_t pawn = mvm.ready() ? mvm.target().pawn : 0;
+    emitFmt("player pawn : {}", pawn ? hex(pawn, 16) : std::string("(未解析)"));
+    if (!pawn) { emitLine("先让玩家的移动组件解析成功再看属性集"); return; }
+
+    struct Hit { uint64_t addr; uint64_t via; std::string viaClass; int depth; };
+    std::vector<Hit> hits;
+    int total = 0;
+
+    eng_.objects().for_each([&](ObjectStat const& st) {
+        if (st.className != "ATR_Movement") return true;
+        ++total;
+        uint64_t o = st.address;
+        for (int depth = 1; depth <= 8; ++depth) {
+            o = eng_.objects().outerOf(o);
+            if (!o) break;
+            if (o == pawn) {
+                hits.push_back({st.address, o, eng_.objects().classNameOf(o), depth});
+                break;
+            }
+        }
+        return true;
+    });
+
+    emitFmt("ATR_Movement 实例总数: {}, 其中 Outer 链能走到玩家 pawn 的: {}",
+             total, hits.size());
+    if (hits.empty()) {
+        emitLine("没有直接挂到 pawn 上的实例 —— 可能挂在 PlayerState 上, 换个判别方式试试");
+        return;
+    }
+
+    emitLine("");
+    emitLine("   地址                链上命中                        值(+0x90 倍率 / +0xa0 摩擦)");
+    emitLine("   " + std::string(76, '-'));
+    for (auto const& h : hits) {
+        auto mult  = mvm.readFloatAt(h.addr, 0x90);
+        auto fric  = mvm.readFloatAt(h.addr, 0xa0);
+        emitFmt("   {}  {} (+{})      {}  {}",
+                 hex(h.addr, 16), sanitize(h.viaClass, 24), h.depth,
+                 mult ? fmt("{:.4f}", *mult) : std::string("?"),
+                 fric ? fmt("{:.4f}", *fric) : std::string("?"));
+    }
+
+    // 对第一个命中做一次实测: 写倍率并观察是否保持。
+    if (!hits.empty()) {
+        const uint64_t target = hits.front().addr;
+        emitLine("");
+        emitFmt("=== 在 {} 上试写 MovementSpeedMultiplier(+0x90) ===", hex(target, 16));
+        auto before = mvm.readFloatAt(target, 0x90);
+        const bool ok = mvm.writeFloatAt(target, 0x90, 5.0f);
+        auto immediate = mvm.readFloatAt(target, 0x90);
+        emitFmt("   {} -> {}   (write {})",
+                 before ? fmt("{:.4f}", *before) : std::string("?"),
+                 immediate ? fmt("{:.4f}", *immediate) : std::string("?"),
+                 ok ? "ok" : "FAILED");
+        emit("   samples: ");
+        int reverted = 0;
+        for (int i = 0; i < 8; ++i) {
+            ::Sleep(40);
+            auto now = mvm.readFloatAt(target, 0x90);
+            if (!now) { emit("?"); break; }
+            emit(fmt("{:.2f} ", *now));
+            if (std::fabs(*now - 5.0f) > 0.01f) ++reverted;
+        }
+        emitLine("");
+        if (reverted == 0) emitLine("   -> 保住了! 该属性可以直接改");
+        else emitFmt("   -> 被改回 {}/8 次(GAS 会在聚合时重算)", reverted);
+
+        emitLine("");
+        emitLine("注: FGameplayAttributeData = {BaseValue, CurrentValue}, 分别在 +0x90 与 +0x94。");
+        emitLine("    上面的测试只动了 BaseValue; 若被改回, 应改 CurrentValue(+0x94) 或两者都改。");
     }
 }
 

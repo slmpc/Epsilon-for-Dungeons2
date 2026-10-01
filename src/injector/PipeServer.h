@@ -17,9 +17,11 @@ namespace epsilon {
 class InjectorChannel {
 public:
     // 创建管道并开始等待注入体连接(非阻塞: 真正的 accept 在后台线程里)。
-    // targetPid 用来推导约定管道名 EpsilonHotInject.<pid> —— 注入体靠自己的
-    // PID 算出同一个名字, 所以不依赖环境变量传递。
-    bool start(uint32_t targetPid, std::string* error = nullptr);
+    // targetPid 与 dllPath 一起推导约定管道名 EpsilonHotPipe2.<pid>.<slot> ——
+    // 注入体用自己的 PID 加自己的模块文件名算出同一个名字, 不依赖显式传递。
+    // 带 dllPath 槽位是为了让不同文件名的 DLL 能并存于同一进程 ——
+    // 这样改完代码可以换个 DLL 名字直接注入, 不必重启游戏。
+    bool start(uint32_t targetPid, std::wstring_view dllPath, std::string* error = nullptr);
 
     // 等注入体报 ready。返回是否就绪。
     bool waitReady(uint32_t timeoutMs);

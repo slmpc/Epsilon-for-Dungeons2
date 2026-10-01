@@ -35,7 +35,24 @@ std::wstring makePipeName(std::wstring_view prefix = L"EpsilonHotInject");
 //   (GetCurrentProcessId), 所以两端各自算出同一个名字, 零传递成本、
 //   零失败点。环境变量仍然会被写入并作为第一优先(见 pipeClient.cpp),
 //   但不再是唯一通路。
-std::wstring defaultPipeName(uint32_t targetPid);
+//
+// ⚠️ 现在名字里还带一个"槽位"(slot), 见 defaultPipeName 的第二个参数。
+std::wstring defaultPipeName(uint32_t targetPid, std::wstring_view slot = {});
+
+// 从模块路径或文件名推导"槽位"标识 —— 取文件名并去掉扩展名, 只保留
+// 字母与数字。
+//
+// 存在的意义: 注入体一旦驻留, 同名 DLL 再注入会被单实例守卫拦住, 而想换新
+// 构建就只能重启游戏。把**管道名与互斥体名都带上模块名**, 不同文件名的 DLL
+// 就会各自拿到独立的槽位, 于是可以在同一个进程里并存:
+//     注入器注入 epsilonPayload2.dll -> slot "epsilonPayload2"
+//     注入体用自己的模块文件名算出同一个 slot
+// 两者仍然不依赖任何显式传递。
+//
+// 注意这不是"放宽守卫": 守卫要防的是**同名**实例争抢同一条管道, 而不同槽位
+// 本来就是不同的管道, 不存在竞争。代价是同一进程里可能同时存在多个注入体,
+// 所以别让它们都去挂钩子(见 Runtime.cpp 里的禁用标记文件)。
+std::wstring moduleSlotFromPath(std::wstring_view pathOrName);
 
 // 管道名 → 完整路径 (\\.\pipe\...)
 std::wstring pipeFullPath(std::wstring_view name);

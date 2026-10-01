@@ -25,6 +25,15 @@ bool connectInjectorPipe(uint32_t retryMs = 3000, std::string* error = nullptr);
 // 当前管道是否已连上。
 bool pipeConnected();
 
+// 从**本模块**的文件名推导"槽位"标识(去掉 .dll、只留字母数字)。
+//
+// 管道名与单实例互斥体名都用它: 注入器按被注入 DLL 的文件名算, 注入体按自己
+// 的模块名算, 两边一致。这样不同文件名的注入体各自拿到独立的管道与互斥体,
+// 可以在同一个进程里并存 —— 改完代码换个 DLL 名字就能注入, 不必重启游戏。
+//
+// 取不到模块名时返回空串, 调用方退化为"只有 PID"的老名字。
+std::wstring ownModuleSlot();
+
 // 通过管道发一条消息。未连接返回 false。
 bool pipeSend(proto::Kind kind, std::string_view payload);
 

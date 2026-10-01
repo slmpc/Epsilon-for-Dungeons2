@@ -182,6 +182,45 @@ fallback 的取值方式, **坏值退化为默认值, 不抛异常** —— 异�
 
 ## 逆向相关的重要背景
 
+### 速度/移动的真正来源是 GAS 属性集 ATR_Movement ★
+
+**不要再试图写 `UCharacterMovementComponent` 的 `MaxWalkSpeed`** —— 实测它每帧
+被游戏重算(写入 130 后连续 8 次采样全是 100; 而同样方式写 `MaxAcceleration`
+(+0x288) 却完全保持, 说明写路径本身没问题, 是这个字段被重算)。
+
+真正的移动参数在 **`ATR_Movement`**(Attribute, 即 GAS 属性集)里。玩家 pawn 上
+挂着唯一一个 `ATR_Movement` 实例(场景里共 30 个, 用 Outer 链判别出属于玩家的那
+一个)。**写它的属性是持久的** —— 实测写入后 8 次采样全部保持, 且跨注入仍然保留。
+
+属性偏移来自代码生成参数表(`0x14a069800` 区段, 每项 0x40 字节, 偏移在 +0x24;
+注意这张表的项布局与 `UCharacterMovementComponent` 那张**不同**, 后者偏移在 +0x2c):
+
+| 偏移 | 属性 |
+|---|---|
+| `+0x90` | `MovementSpeedMultiplier` |
+| `+0xa0` | `MovementFriction` |
+| `+0xb0` | `MovementFrictionMultiplier` |
+| `+0xc0` | `MovementRotation` |
+| `+0xd0` | `MovementRotationMultiplier` |
+| `+0xe0` | `MovementGravity` |
+| `+0xf0` | `GravityScale` |
+| `+0x100` | `AirControl` |
+| `+0x110` | `RollCooldown` |
+| `+0x130` | `RollCharges` |
+| `+0x160` | `Mass` |
+| `+0x170` | `InteractionRange` |
+
+这也解释了两个此前的疑问: 为什么组件上的 `GravityScale`(+0x1c0)与 `AirControl`
+(+0x2ac)读出来都是 0 —— **真身在这里, 组件上那份是派生/未使用的**。
+
+判别玩家实例的方法见 `cmdAttributeMovement`: 沿 Outer 链往上走, 命中玩家 pawn
+的那一个就是(实测深度 1, 即 ASC 直接挂在 pawn 上)。
+
+**仍未解决**: `MovementSpeedMultiplier` 的当前值是 0(写入 5.0 后无游戏内效果
+的反馈), 所以还不能确认它是否就是驱动移动速度的那个属性。下一步应当在
+`ATR_Movement` 里找**值呈现单位量级(1.0)**或随移动变化的属性, 用 `floats`
+把整个属性块打出来逐个对照。
+
 ### 这个构建的 UE5 反射布局被改过
 
 `Dungeons-Win64-Shipping.exe`(UE 5.6.1)里 **`SuperStruct` 与 `ChildProperties`

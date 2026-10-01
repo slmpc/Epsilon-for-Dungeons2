@@ -31,17 +31,36 @@ std::function<void()> gOnDisconnect;
 
 } // namespace
 
+// 从**本模块**的文件名推导槽位, 供管道名与单实例互斥体使用。
+// 用"本模块内某个函数的地址"反查模块句柄, 这样不必从 DllMain 把 hModule
+// 一路传下来 —— 注入体内部多处都要用它(管道、互斥体), 参数传递只会增加出错面。
+// 取不到时返回空串, 调用方退化为"只有 PID"的老名字。
+std::wstring ownModuleSlot() {
+    HMODULE h = nullptr;
+    if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                  GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                              reinterpret_cast<LPCWSTR>(&connectInjectorPipe), &h) ||
+        h == nullptr) {
+        return {};
+    }
+    wchar_t path[MAX_PATH]{};
+    const DWORD n = ::GetModuleFileNameW(h, path, static_cast<DWORD>(std::size(path)));
+    if (n == 0) return {};
+    return moduleSlotFromPath(std::wstring_view(path, n));
+}
+
 bool connectInjectorPipe(uint32_t retryMs, std::string* error) {
     std::lock_guard lk(gMu);
 
     auto& c = ctx();
 
-    // 管道名 = 由本进程 PID 推导的约定名。
-    //   注入器用目标 PID 算出同一个字符串, 注入体用自己的 PID 也得到它 ——
-    //   两端零传递。这是**唯一**的通路: 早先还试过用环境变量传递, 实测
-    //   GetEnvironmentVariableW 读不到被外部改写的 PEB, 那条路从未生效,
-    //   已删除(连同注入器侧整个 PEB 改写代码)。
-    const std::wstring name = defaultPipeName(::GetCurrentProcessId());
+    // 管道名 = 由本进程 PID + **本模块文件名**推导的约定名。
+    //   注入器用目标 PID 与被注入 DLL 的文件名算出同一个字符串, 注入体用
+    //   自己的 PID 与自己的模块名也得到它 —— 两端零传递。这是**唯一**的通路:
+    //   早先还试过用环境变量传递, 实测 GetEnvironmentVariableW 读不到被外部
+    //   改写的 PEB, 那条路从未生效, 已删除(连同注入器侧整个 PEB 改写代码)。
+    //   带上模块名是为了让不同文件名的注入体各用各的管道, 互不争抢。
+    const std::wstring name = defaultPipeName(::GetCurrentProcessId(), ownModuleSlot());
 
     std::string err;
     if (!c.pipe.connect(name, retryMs, &err)) {

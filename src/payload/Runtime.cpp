@@ -93,6 +93,21 @@ bool autoHookAllowed() {
     if (::GetEnvironmentVariableA("EPSILON_NO_AUTO_HOOK", buf, sizeof(buf)) > 0) {
         if (::atoi(buf) != 0) return false;
     }
+
+    // 再给一个**不用重启游戏**就能生效的开关: 存在这个标记文件就跳过自动安装。
+    //
+    // 为什么需要它: 环境变量属于游戏进程, 想在"游戏已经开着"的时候改变行为
+    // 是做不到的。而调试时经常需要在同一个进程里再注入一个不同名字的注入体
+    // (见 commitSingleton 的槽位说明), 那种情况下第二个注入体**不应该**再去
+    // 挂钩子 —— 同一个 Present 被挂两次没有意义, 还有风险。
+    // 建/删这个文件比重启游戏快得多。
+    wchar_t tmp[MAX_PATH]{};
+    const DWORD n = ::GetTempPathW(static_cast<DWORD>(std::size(tmp)), tmp);
+    if (n > 0 && n < std::size(tmp)) {
+        std::wstring flag = tmp;
+        flag += L"epsilonPayload_no_autohook";
+        if (::GetFileAttributesW(flag.c_str()) != INVALID_FILE_ATTRIBUTES) return false;
+    }
     return true;
 }
 
@@ -255,11 +270,21 @@ void setModuleInfo(uint64_t base, uint64_t size, std::wstring path) {
 HANDLE gSingletonMutex = nullptr;
 
 bool claimSingletonOrExit() {
-    wchar_t name[128]{};
-    // 名字里带 PID: 作用域限定在**当前进程**内 —— 我们只关心"同一进程里
-    // 别重复起实例", 不同进程各有各的注入体是正常且期望的。
-    ::_snwprintf_s(name, _TRUNCATE, L"Local\\epsilonPayload_instance_%lu",
-                   ::GetCurrentProcessId());
+    wchar_t name[192]{};
+    // 名字里带 PID **与模块槽位**:
+    //   * PID 让作用域限定在当前进程内 —— 我们只关心"同一进程里别重复起实例",
+    //     不同进程各有各的注入体是正常且期望的。
+    //   * 槽位(模块文件名)让**不同文件名的**注入体可以并存。这不是放宽守卫:
+    //     守卫要防的是同名实例争抢同一条管道, 而不同槽位对应不同管道, 不存在
+    //     竞争。好处是改完代码换个 DLL 名字就能注入, 不必重启游戏。
+    const std::wstring slot = ownModuleSlot();
+    if (slot.empty()) {
+        ::_snwprintf_s(name, _TRUNCATE, L"Local\\epsilonPayload_instance_%lu",
+                       ::GetCurrentProcessId());
+    } else {
+        ::_snwprintf_s(name, _TRUNCATE, L"Local\\epsilonPayload_instance_%lu_%s",
+                       ::GetCurrentProcessId(), slot.c_str());
+    }
 
     ::SetLastError(0);
     HANDLE h = ::CreateMutexW(nullptr, FALSE, name);

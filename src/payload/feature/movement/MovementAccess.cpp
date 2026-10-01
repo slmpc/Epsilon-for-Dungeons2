@@ -350,6 +350,22 @@ uint64_t PlayerMovement::findLocalPlayerPawn(Engine& engine) const {
 // ===========================================================================
 //  读写
 // ===========================================================================
+std::optional<float> PlayerMovement::readFloatAt(uint64_t addr, int32_t offset) const {
+    if (!addr) return std::nullopt;
+    float v = 0.0f;
+    if (!safeRead(&v, reinterpret_cast<const void*>(
+                            addr + static_cast<uint32_t>(offset)), sizeof(v))) {
+        return std::nullopt;
+    }
+    return v;
+}
+
+bool PlayerMovement::writeFloatAt(uint64_t addr, int32_t offset, float value) const {
+    if (!addr) return false;
+    return safeWrite(reinterpret_cast<void*>(addr + static_cast<uint32_t>(offset)),
+                     &value, sizeof(value));
+}
+
 std::optional<float> PlayerMovement::readFloat(int32_t offset) const {
     if (!offset || !target_.movement) return std::nullopt;
     float v = 0.0f;

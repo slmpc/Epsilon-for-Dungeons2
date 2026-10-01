@@ -30,17 +30,50 @@ constexpr uint64_t recheckIntervalMs = 5000;
 
 uint64_t nowMs() { return ::GetTickCount64(); }
 
-// 玩家 pawn 的类名判定。
+// 玩家 pawn 的类名判定 —— 按优先级排序候选。
 //
-// 实测(IDA 里的字符串/RTTI)存在这些角色类:
-//     PlayerCharacter / MockPlayerCharacter / MobCharacter / BaseCharacter
-// MockPlayerCharacter 是游戏自己的"假玩家"(教程/演示用), 它**不是**本地真玩家。
-// 如果被选中, 改动就会作用在错误的对象上, 表现为"开了没效果"。所以显式排除。
-bool looksLikeLocalPlayer(std::string_view className) {
-    if (icontains(className, "Mock")) return false;
-    if (icontains(className, "Mob")) return false;
-    if (icontains(className, "Projectile")) return false;
-    return icontains(className, "PlayerCharacter") || icontains(className, "PlayerPawn");
+// 实测这个游戏的角色类名(真机关卡 actor 列表):
+//     BP_GameplayPlayerController_C   控制器(不是 pawn)
+//     BP_AlexCharacter_C              ★ 玩家角色本体
+//     BP_WolfCharacter_C              同伴/召唤物
+//     BasePlayerState                 玩家状态(不是 pawn)
+//
+// 原先只匹配 "PlayerCharacter"/"PlayerPawn" —— 这个构建两个都不存在, 所以
+// 恒不命中。正确的做法是**从实测数据**里认这些具体名字, 并把判据做成有优先级
+// 的列表, 而不是靠一个宽泛的子串。
+//
+// 为何用有序列表而不是"哪个先出现用哪个": actor 列表里控制器(索引 480)排在
+// 玩家角色(索引 483)之前, 单纯取第一个命中会选错对象。
+struct PlayerClassRule {
+    std::string_view needle;   // 类名里必须含有的子串
+    int              rank;     // 越小越优先
+};
+
+constexpr PlayerClassRule playerClassRules[] = {
+    {"AlexCharacter", 0},        // 实测的玩家角色
+    {"BP_SteveCharacter", 0},    // 初代/可能的另一套主角
+    {"DungeonsCharacter", 1},
+    {"PlayerCharacter", 2},
+    {"PlayerPawn", 3},
+};
+
+int playerRankFor(std::string_view className) {
+    // 先排除明确不是本地玩家的东西。
+    // Mock = 游戏的假玩家(教程/演示); Mob = 怪物; Wolf = 同伴;
+    // Controller / State / HUD 在 UE 里不是 pawn, 但它们**可能**含有
+    // "Player" 字样, 必须显式排掉, 否则会把控制器当成角色。
+    if (icontains(className, "Mock")) return -1;
+    if (icontains(className, "Mob")) return -1;
+    if (icontains(className, "Projectile")) return -1;
+    if (icontains(className, "Controller")) return -1;
+    if (icontains(className, "PlayerState")) return -1;
+    if (icontains(className, "HUD")) return -1;
+    if (icontains(className, "Wolf")) return -1;
+
+    for (auto const& r : playerClassRules) {
+        if (icontains(className, r.needle)) return r.rank;
+    }
+    return -1;
 }
 
 // ---- 诊断文案: 一律纯 ASCII ----
@@ -225,11 +258,19 @@ uint64_t PlayerMovement::findLocalPlayerPawn(Engine& engine) const {
     if (!world) return 0;
 
     const auto list = view.actors(*world);
+
+    // 取优先级最高(rank 最小)的那个候选, 而不是第一个出现的。
+    // 实测 actor 列表里控制器排在玩家角色之前, 取第一个会选错对象。
+    uint64_t best = 0;
+    int bestRank = 9999;
     for (auto const& a : list) {
         if (!a.address) continue;
-        if (looksLikeLocalPlayer(a.className)) return a.address;
+        const int rank = playerRankFor(a.className);
+        if (rank < 0 || rank >= bestRank) continue;
+        bestRank = rank;
+        best = a.address;
     }
-    return 0;
+    return best;
 }
 
 // ===========================================================================

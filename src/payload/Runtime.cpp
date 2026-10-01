@@ -218,11 +218,56 @@ void setModuleInfo(uint64_t base, uint64_t size, std::wstring path) {
 }
 
 // ---------------------------------------------------------------------------
+// 单实例守卫: 每个进程只允许一个注入体实例真正启动。
+//
+// 为什么需要它: 注入器可以对同一进程反复注入同一个 DLL。LoadLibrary 对
+// "已在进程里的模块"只是加引用计数, 不会重跑 DllMain —— 但**每次注入都会
+// 让注入器新起一个远端线程去调 LoadLibraryW**, 而我们的 DllMain 每次被调用
+// 都会建一个新的 runtimeMain 线程。重复注入 N 次就留下 N 个 runtimeMain,
+// 全都在抢同一个管道名。
+//
+// 后果不是"浪费点资源"这么轻: 新实例连不上管道(名字被旧实例占着), 注入器
+// 于是报"等注入体连接管道超时", 看起来像注入失败, 实际是旧实例赢了竞争。
+// 实测连续迭代时被这个坑到过 —— 会让人误以为代码坏了。
+//
+// 用命名互斥体而不是"枚举模块名": 后者要处理路径/文件名/重命名副本等一堆
+// 边界, 而且判断与创建之间有竞争窗口。互斥体由内核保证原子性, 一次成功
+// 创建就代表独占。
+HANDLE gSingletonMutex = nullptr;
+
+bool claimSingletonOrExit() {
+    wchar_t name[128]{};
+    // 名字里带 PID: 作用域限定在**当前进程**内 —— 我们只关心"同一进程里
+    // 别重复起实例", 不同进程各有各的注入体是正常且期望的。
+    ::_snwprintf_s(name, _TRUNCATE, L"Local\\epsilonPayload_instance_%lu",
+                   ::GetCurrentProcessId());
+
+    ::SetLastError(0);
+    HANDLE h = ::CreateMutexW(nullptr, FALSE, name);
+    if (!h) return true;                       // 建不出来就别拦, 让它继续
+    if (::GetLastError() == ERROR_ALREADY_EXISTS) {
+        ::CloseHandle(h);
+        return false;                          // 已有实例
+    }
+    gSingletonMutex = h;                       // 持有到进程结束
+    return true;
+}
+
 unsigned long __stdcall runtimeMain(void* /*param*/) {
     ::SetThreadDescription(::GetCurrentThread(), L"epsilon-runtime");
 
     // 文件日志最先开 —— 后面每一步都要留痕, 崩了才查得到。
     logFileOpen();
+
+    // 单实例守卫必须放在最前面: 重复实例如果先连上管道, 会让注入器误判
+    // 成"注入成功但命令没响应"。详见 claimSingletonOrExit 的注释。
+    if (!claimSingletonOrExit()) {
+        trace("本进程里已有一个注入体实例在运行 —— 本次实例退出");
+        trace("(预期行为: 避免多个实例争抢同一管道名)");
+        logFileClose();
+        return 0;
+    }
+
     trace(fmt("runtimeMain 进入 (pid {}, 模块基址 {}, 大小 {})",
               ::GetCurrentProcessId(), hex(gModuleBase, 16), humanBytes(gModuleSize)));
 
@@ -235,7 +280,10 @@ unsigned long __stdcall runtimeMain(void* /*param*/) {
 
     trace("正在连接注入器管道...");
     std::string pipeErr;
-    if (connectInjectorPipe(3000, &pipeErr)) {
+    // 重试要足够长: 如果同一个进程里已经被注入过本 DLL 的旧实例, 它们会短暂
+    // 抢占管道名。旧实例连上后大多因注入器退出而断开, 让重试窗口覆盖住这段
+    // 时间, 新实例就能等到管道空出来。
+    if (connectInjectorPipe(8000, &pipeErr)) {
         c.sink = Sink::pipe;
         c.verbose = true;
         trace("已连接注入器管道, 输出走管道");

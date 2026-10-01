@@ -62,11 +62,34 @@ private:
     // 全 dump 出来, 并标注它指向的位置能否解出合法的 FField 名字。
     void dumpStructPointerSlots(uint64_t structObj);
 
+    // 在 ULevel 对象上找 TArray 形态的 Actors 数组。
+    // 这个构建的 ULevel::Actors 静态偏移是错的(实测 actorCount=0), 而
+    // TArray 有很强的可识别特征: {ptr, count, capacity}, ptr 落在堆区、
+    // 0 < count <= capacity 且 capacity 量级合理。按这个特征扫比继续猜常量可靠。
+    void scanForActorArray(uint64_t levelObj);
+
+    // 把一段内存按"8 字节指针 + 解释"的形式打印出来。
+    // 用于核对某个槽到底指向什么(前一个命令会给出候选地址)。
+    void dumpPointers(uint64_t addr, int count);
+
+    // 在给定的 FField 对象上找出"哪个偏移存放 FName 索引"。
+    //
+    // 存在的意义: 属性链之所以读不出来, 只剩一个可能 —— FField::NamePrivate
+    // 的静态偏移(+0x28)对这个构建不对。这个命令拿一个**已知是 FField 的指针**
+    // (由 props 的槽扫描给出), 遍历 0x18..0x48 的每个 4 字节位置, 看哪个能解出
+    // 合法 FName, 直接把真实偏移定下来。
+    void probeFFieldNameOffset(uint64_t fieldAddr);
+
     // ---- 帧钩子 ----
     void cmdHooks();          // 显示状态
     void cmdHookInstall();   // 显式安装
 
     ue::Engine& eng_;
+
+    // 槽扫描里自动做 FField 名字偏移探测的次数预算。
+    // 一次 props 会遍历整条继承链(9 个类), 每个类都探一遍既慢又刷屏,
+    // 只对第一个类做一次就够定位偏移了。
+    int fieldProbeBudget_ = 1;
 };
 
 } // namespace epsilon::payload

@@ -116,14 +116,24 @@ std::vector<PropertyField> Reflection::propertiesOf(uint64_t structObj) const {
     //
     // 为什么需要这一步: UStruct 各字段的偏移是**每个引擎版本都可能变**的。
     // 实测这个构建上报的类大小/继承链都对, 但属性数恒为 0 —— 也就是
-    // SuperStruct 偏移是对的, 但属性链起点偏移不对(注意本构建里
-    // SuperStruct / ChildProperties 这两个反射名都不在字符串表里,
-    // 说明 UStruct 的布局与常见 UE5 版本不同)。
+    // SuperStruct 偏移是对的, 但属性链起点偏移不对(本构建的字符串表里
+    // SuperStruct / ChildProperties 这两个反射名都不存在, 只有 Children,
+    // 说明它用的是改过的 UStruct 布局)。
     //
-    // 属性链起点是 UStruct 里某个 8 字节指针, 它指向的 FField 必然有一个能
-    // 解析出非空名字的 NamePrivate。于是可以按"指针 + 该处能读出合法名字 +
-    // 走出来的链里有 *Property 类型"来确认候选偏移 —— 比继续猜常量可靠,
-    // 而且下次游戏更新后也能自己找回。
+    // 判据:
+    //   1. 槽值是指针
+    //   2. 该指针 + layout_.fieldName 处能解出非空 FName
+    //   3. 走出来的链里有 *Property 类型名
+    //   4. 链里出现已知的引擎属性名(MaxWalkSpeed 等)则直接采信 —— 这是
+    //      最强的判据, 因为它不可能由垃圾数据偶然凑出
+    struct Offer {
+        uint32_t offset = 0;
+        std::vector<PropertyField> chain;
+        bool     strong = false;   // 链里含已知属性名
+        size_t   propertyLike = 0;
+    };
+    std::vector<Offer> offers;
+
     for (uint32_t probe = 0x20; probe <= 0x98; probe += 8) {
         if (probe == offStructChildProps) continue;      // 上面试过了
         uint64_t cand = 0;
@@ -136,17 +146,42 @@ std::vector<PropertyField> Reflection::propertiesOf(uint64_t structObj) const {
 
         auto probeChain = walk(cand, kMaxChain);
         if (probeChain.empty()) continue;
-        // 再按类型名筛一层: FProperty 链里应当出现 *Property 类型名。
-        size_t propertyLike = 0;
-        for (auto const& p : probeChain) {
-            if (icontains(p.type, "Property")) ++propertyLike;
-        }
-        if (propertyLike == 0) continue;
 
-        lastChildPropsOffset_ = probe;
-        return probeChain;
+        Offer o;
+        o.offset = probe;
+        for (auto const& p : probeChain) {
+            // 已知的引擎属性名做交叉验证。命中一个就足以排除垃圾候选。
+            if (p.name == "MaxWalkSpeed" || p.name == "JumpZVelocity" ||
+                p.name == "GravityScale"  || p.name == "AirControl" ||
+                p.name == "MaxAcceleration" || p.name == "RelativeLocation" ||
+                p.name == "RootComponent") {
+                o.strong = true;
+            }
+            if (icontains(p.type, "Property")) ++o.propertyLike;
+        }
+        o.chain = std::move(probeChain);
+        offers.push_back(std::move(o));
     }
-    return {};
+
+    if (offers.empty()) return {};
+
+    // 优先采信"链里含已知属性名"的候选; 没有就退到属性最多的那个 ——
+    // 属性链越长越可能是真链, 垃圾候选通常只有一两个字段。
+    Offer const* best = nullptr;
+    for (auto const& o : offers) {
+        if (!o.strong) continue;
+        if (!best || o.chain.size() > best->chain.size()) best = &o;
+    }
+    if (!best) {
+        for (auto const& o : offers) {
+            if (o.propertyLike == 0) continue;
+            if (!best || o.chain.size() > best->chain.size()) best = &o;
+        }
+    }
+    if (!best) return {};
+
+    lastChildPropsOffset_ = best->offset;
+    return best->chain;
 }
 
 // 上一次自愈找出的属性链偏移。0 表示仍在用静态偏移。

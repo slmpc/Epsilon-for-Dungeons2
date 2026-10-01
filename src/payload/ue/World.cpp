@@ -13,7 +13,16 @@ namespace {
 
 // 偏移经验值(Dungeons2 实测基线, 仅作反射失败时的退路)
 constexpr int32_t kFallbackPersistentLevel = 0x30;   // UWorld::PersistentLevel
-constexpr int32_t kFallbackActors          = 0x40;   // ULevel::Actors
+
+// ULevel::Actors —— 真机实测确定的值。
+//
+// 常见 UE5 版本把这个字段放在 0x98 一带(有的资料写 0x40), 但本构建都不是。
+// 因为属性链反射对这个构建失效(见 Reflection.cpp 的自愈逻辑), 这里拿不到
+// 反射值, 只能实测: 直接扫 ULevel 对象体上符合 TArray 形态的槽, 得到
+//     +0xa0 -> { data, num = 972, max = 1364 }, 首元素类名 WorldSettings
+// WorldSettings 在 UE 里恒定占据 ULevel::Actors 的索引 0, 所以可以判定
+// +0xa0 就是 Actors。
+constexpr int32_t kFallbackActors          = 0xa0;   // ULevel::Actors
 
 // 场景组件里相对位置字段(capsule/root)常见的偏移。取不到就跳过, 不影响其它功能。
 constexpr uint32_t kOffActorRootComponent = 0x1B8;

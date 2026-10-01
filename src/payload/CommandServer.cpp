@@ -156,6 +156,35 @@ bool CommandServer::execute(std::string_view line) {
     else if (cmd == "actors" || cmd == "list") { cmdActors(rest); }
     else if (cmd == "player" || cmd == "pawn") { cmdPlayer(); }
     else if (cmd == "mem" || cmd == "dump")    { cmdMem(rest); }
+    else if (cmd == "ptr" || cmd == "ptrs") {
+        // ptr <地址> [个数] —— 按指针逐个解释一段内存
+        if (rest.empty()) { emitLine("用法: ptr <地址> [个数]"); }
+        else {
+            uint64_t a = 0;
+            try { a = std::stoull(rest[0], nullptr, 0); } catch (...) {
+                emitFmt("地址解析失败: {}", rest[0]);
+            }
+            if (a) dumpPointers(a, static_cast<int>(optInt(rest, "n").value_or(16)));
+        }
+    }
+    else if (cmd == "probeff" || cmd == "ffield") {
+        // probeff <FField 地址> —— 定出 NamePrivate 的真实偏移
+        if (rest.empty()) { emitLine("用法: probeff <FField 地址>"); }
+        else {
+            uint64_t a = 0;
+            try { a = std::stoull(rest[0], nullptr, 0); } catch (...) {}
+            if (a) probeFFieldNameOffset(a); else emitLine("地址解析失败");
+        }
+    }
+    else if (cmd == "scanlevel") {
+        // scanlevel <ULevel 地址> —— 在对象上找 TArray 形态的 Actors
+        if (rest.empty()) { emitLine("用法: scanlevel <ULevel 地址>"); }
+        else {
+            uint64_t a = 0;
+            try { a = std::stoull(rest[0], nullptr, 0); } catch (...) {}
+            if (a) scanForActorArray(a); else emitLine("地址解析失败");
+        }
+    }
     else if (cmd == "quit" || cmd == "exit" || cmd == "detach") {
         emitLine("bye");
         return false;
@@ -329,6 +358,147 @@ void CommandServer::cmdClass(std::vector<std::string> const& args) {
 }
 
 // ---------------------------------------------------------------------------
+//  probeFFieldNameOffset — 定出 FField::NamePrivate 的真实偏移
+//
+//  FName 在内存里是一个 32 位索引(比较索引)。FField 的头几个字段是固定的,
+//  后面紧跟 NamePrivate。这里从 0x18 到 0x48 每 4 字节试一次, 哪个位置解出
+//  的 FName 是**有意义的名字**(而不是空/"None"), 哪个就是真实偏移。
+//
+//  判据要严一点: 垃圾值恰好落在 FNamePool 范围内并解出字符串是可能的, 所以
+//  同时打印所有候选, 由人按上下文判断 —— 通常真偏移只有一两个候选, 且解出的
+//  名字是"MaxWalkSpeed"这种一眼能认的。
+// ---------------------------------------------------------------------------
+void CommandServer::probeFFieldNameOffset(uint64_t fieldAddr) {
+    if (!fieldAddr) return;
+
+    emitFmt("=== 在 {} 上找 FName 索引偏移 ===", hex(fieldAddr, 16));
+    emitLine("      off    u32 value    resolves-to");
+    emitLine("      " + std::string(50, '-'));
+
+    int good = 0;
+    for (uint32_t off = 0x18; off <= 0x48; off += 4) {
+        int32_t idx = 0;
+        if (!safeRead(&idx, reinterpret_cast<const void*>(fieldAddr + off), 4)) continue;
+        if (idx <= 0) continue;                       // 0 = "None", 不是我们要的
+
+        const std::string nm = eng_.names().resolve(idx);
+        if (nm.empty()) continue;
+
+        ++good;
+        emitFmt("      +{:#04x}   {:<10}  \"{}\"", off, idx, sanitize(nm, 40));
+    }
+
+    if (good == 0) {
+        emitLine("      (没有解出任何名字 —— 这个地址可能不是 FField)");
+    } else {
+        emitLine("");
+        emitLine("=> 真正的 FField::NamePrivate 偏移应当是解出属性名的那个。");
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  scanForActorArray — 在 ULevel 对象上找回 Actors 数组
+//
+//  实测这个构建上 ULevel::Actors 的静态偏移是错的(PersistentLevel 读出
+//  0 actors)。UE 的 TArray 在内存里是 {T* Data; int32 Num; int32 Max} 三个
+//  连续字段, 特征很强:
+//      * Data 是堆指针(不是 "None" 那种空槽)
+//      * 0 < Num <= Max
+//      * Max 量级合理(关卡 actor 数通常几十到几万, 不会到百万)
+//  于是按这个特征扫对象体的每个 8 字节槽, 把候选全列出来 —— 比继续猜常量可靠。
+// ---------------------------------------------------------------------------
+void CommandServer::scanForActorArray(uint64_t levelObj) {
+    if (!levelObj) return;
+
+    emitFmt("=== 在 {} ({}) 上扫 TArray 形态的 Actors ===",
+             hex(levelObj, 16), sanitize(eng_.objects().nameOf(levelObj), 32));
+    emitLine("      slot   data               num      max    first-elem-class");
+    emitLine("      " + std::string(72, '-'));
+
+    struct Cand { uint32_t off; uint64_t data; int32_t num; int32_t max; };
+    std::vector<Cand> candidates;
+
+    // 扫到 0x300 就够: ULevel 的 Actors 在对象体前部。
+    for (uint32_t off = 0x20; off <= 0x300; off += 8) {
+        uint64_t data = 0;
+        int32_t  num = 0, max = 0;
+        if (!safeRead(&data, reinterpret_cast<const void*>(levelObj + off), 8)) continue;
+        if (!safeRead(&num,  reinterpret_cast<const void*>(levelObj + off + 8), 4)) continue;
+        if (!safeRead(&max,  reinterpret_cast<const void*>(levelObj + off + 12), 4)) continue;
+
+        if (data < 0x10000 || data > 0x7FFFFFFFFFFF) continue;   // 必须是像样的指针
+        if (num <= 0 || max <= 0) continue;
+        if (num > max) continue;
+        if (max > 4'000'000) continue;                           // 量级过滤
+        // 元素大小 × max 不应该离谱(元素至少 8 字节)
+        if (static_cast<uint64_t>(max) * 8ull > (1ull << 34)) continue;
+
+        candidates.push_back(Cand{off, data, num, max});
+    }
+
+    if (candidates.empty()) {
+        emitLine("      (没有找到任何 TArray 候选)");
+        return;
+    }
+
+    for (auto const& c : candidates) {
+        // 读第一个元素, 看它是不是一个合法的 UObject —— 这能把
+        // "碰巧长得像 TArray" 的槽基本筛干净。
+        std::string firstCls = "?";
+        uint64_t first = 0;
+        if (safeRead(&first, reinterpret_cast<const void*>(c.data), 8) && first) {
+            firstCls = sanitize(eng_.objects().classNameOf(first), 24);
+        }
+        emitFmt("      +{:#04x}  {:<18} {:>7}  {:>7}   {}",
+                 c.off, hex(c.data, 16), c.num, c.max, firstCls);
+    }
+
+    emitLine("");
+    emitLine("=> 上面 data 指向的对象类名如果是 Actor 系, 那个 slot 就是 ULevel::Actors。");
+}
+
+// ---------------------------------------------------------------------------
+//  dumpPointers — 按指针逐个解释一段内存
+//
+//  前一个命令给出候选地址后, 用这个核对它到底指向什么: 是 UObject(能解出
+//  类名/对象名) 还是普通数据。两级的诊断缺一不可 —— 只看"像不像指针"会把
+//  一堆无关槽也算进来。
+// ---------------------------------------------------------------------------
+void CommandServer::dumpPointers(uint64_t addr, int count) {
+    if (!addr) return;
+    if (count <= 0) count = 16;
+    if (count > 64) count = 64;
+
+    emitFmt("=== {} 起 {} 个 8 字节槽 ===", hex(addr, 16), count);
+    for (int i = 0; i < count; ++i) {
+        const uint64_t slot = addr + static_cast<uint64_t>(i) * 8;
+        uint64_t v = 0;
+        if (!safeRead(&v, reinterpret_cast<const void*>(slot), 8)) {
+            emitFmt("  +{:#06x}  <读不到>", i * 8);
+            break;
+        }
+        std::string note;
+        if (v >= 0x10000 && v <= 0x7FFFFFFFFFFF) {
+            // 先试 UObject: 类名 + 对象名
+            const std::string cls = eng_.objects().classNameOf(v);
+            const std::string nm  = eng_.objects().nameOf(v);
+            if (!cls.empty()) {
+                note = fmt("UObject {} :: {}", sanitize(cls, 28), sanitize(nm, 36));
+            } else {
+                // 再试 FName(低位 32 位是 FName 索引)
+                const int32_t idx = static_cast<int32_t>(v & 0xFFFFFFFFull);
+                const std::string fname = eng_.names().resolve(idx);
+                if (!fname.empty()) note = fmt("FName \"{}\"", sanitize(fname, 32));
+                else                note = "(不指向 UObject, 也不是 FName)";
+            }
+        } else if (v != 0) {
+            note = fmt("(小整数 {})", v);
+        }
+        emitFmt("  +{:#06x}  {:<18} {}", i * 8, hex(v, 16), note);
+    }
+}
+
+// ---------------------------------------------------------------------------
 //  dumpStructPointerSlots — 属性链读空时的取证
 //
 //  UStruct 里"属性链起点"是个 8 字节指针。静态偏移一旦对这个构建失效,
@@ -375,6 +545,26 @@ void CommandServer::dumpStructPointerSlots(uint64_t structObj) {
         emitLine("         可能该类确实没有可反射属性, 或 FField::NamePrivate 偏移也变了。");
     } else {
         emitLine("      -> 有槽能解出名字候选(见上)。用 mem va=<该槽指向的地址> 进一步核对。");
+    }
+
+    // 只对第一个类自动做 FField 名字偏移探测。
+    // 属性链读不出来的原因只剩两种: 链起点偏移错, 或 NamePrivate 偏移错。
+    // 上面已经把"哪些槽可能是指针"列出来了, 这里再自动挑一个候选做名字偏移
+    // 探测, 一次命令就能把两个偏移都定下来, 省掉一轮人工搬运地址。
+    if (plausible > 0 && fieldProbeBudget_ > 0) {
+        --fieldProbeBudget_;
+        // 挑第一个"值是用户态指针且不在本模块镜像范围内"的槽 ——
+        // FField 是堆对象, 不会落在 Shipping.exe 的映像区间里。
+        for (uint32_t off = 0x20; off <= 0x98; off += 8) {
+            uint64_t v = 0;
+            if (!safeRead(&v, reinterpret_cast<const void*>(structObj + off), 8)) continue;
+            if (v < 0x10000 || v > 0x7FFFFFFFFFFF) continue;
+            if (v >= eng_.moduleBase() && v < eng_.moduleBase() + eng_.moduleSize()) continue;
+            emitLine("");
+            emitFmt("      [自动探测] 拿 +{:#x} 的候选 {} 试名字偏移:", off, hex(v, 16));
+            probeFFieldNameOffset(v);
+            break;
+        }
     }
 }
 
@@ -667,7 +857,9 @@ void CommandServer::cmdPlayer() {
     const auto list = view.actors(*world);
     if (list.empty()) {
         emitLine("actor list is EMPTY -- the level's Actors array read failed");
-        emitLine("  (offset for ULevel::Actors may be wrong for this build)");
+        // 直接在同一趟里把 ULevel 对象扫一遍, 免得还要人工拿地址再跑一次
+        // scanlevel。关卡对象的地址就在上面一行, 但手工搬运容易出错。
+        scanForActorArray(level->address);
         return;
     }
 
@@ -684,12 +876,20 @@ void CommandServer::cmdPlayer() {
         if (!looksLikePawn) continue;
 
         ++pawnish;
-        // 这里的判定必须与 feature/MovementAccess.cpp 的 looksLikeLocalPlayer 一致,
-        // 否则这条命令会骗人。
-        const bool accepted =
-            !icontains(a.className, "Mock") && !icontains(a.className, "Mob") &&
-            !icontains(a.className, "Projectile") &&
-            (icontains(a.className, "PlayerCharacter") || icontains(a.className, "PlayerPawn"));
+        // 与 feature/MovementAccess.cpp 的判定保持一致。那里是有优先级的有序
+        // 规则表(实测玩家类是 BP_AlexCharacter_C), 这里复刻同样的排除项与
+        // 命中项, 否则这条命令会给出误导性的结论。
+        const bool excluded =
+            icontains(a.className, "Mock") || icontains(a.className, "Mob") ||
+            icontains(a.className, "Projectile") || icontains(a.className, "Controller") ||
+            icontains(a.className, "PlayerState") || icontains(a.className, "HUD") ||
+            icontains(a.className, "Wolf");
+        const bool accepted = !excluded &&
+            (icontains(a.className, "AlexCharacter") ||
+             icontains(a.className, "BP_SteveCharacter") ||
+             icontains(a.className, "DungeonsCharacter") ||
+             icontains(a.className, "PlayerCharacter") ||
+             icontains(a.className, "PlayerPawn"));
 
         if (accepted && firstMatch == SIZE_MAX) firstMatch = i;
         if (accepted) ++matched;
@@ -703,9 +903,10 @@ void CommandServer::cmdPlayer() {
     emitFmt("pawn-like actors : {}", pawnish);
     emitFmt("module matches   : {}", matched);
     if (matched == 0) {
-        emitLine("=> NO MATCH. The modules filter on the class name containing");
-        emitLine("   'PlayerCharacter' or 'PlayerPawn' while excluding Mock/Mob.");
-        emitLine("   Copy one of the class names above and tell me which one is you.");
+        emitLine("=> NO MATCH. The modules look for AlexCharacter / SteveCharacter /");
+        emitLine("   DungeonsCharacter / PlayerCharacter / PlayerPawn, and exclude");
+        emitLine("   Controller / PlayerState / HUD / Mock / Mob / Wolf.");
+        emitLine("   Tell me which class name above is the actual player.");
     } else if (firstMatch != SIZE_MAX) {
         emitFmt("=> module would pick [{}] {} ({})",
                 list[firstMatch].index, sanitize(list[firstMatch].className, 36),

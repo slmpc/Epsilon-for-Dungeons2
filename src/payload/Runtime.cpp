@@ -67,20 +67,28 @@ bool gAutoHookDone = false;
 // 前向声明: 定义在 featureTickTrampoline 之后, 但被它调用。
 void maybeAutoInstallHook();
 
-// 读取自动安装开关。EPSILON_NO_AUTO_HOOK=1 可关闭。
+// 读取自动安装开关。**默认关闭**, 设 EPSILON_AUTO_HOOK=1 才开启。
 //
-// 为什么用环境变量而不是配置文件:
-//   如果这个钩子导致游戏崩溃, 用户需要一条**在游戏之外**就能生效的关闭途径。
-//   配置文件也能改, 但环境变量更直接 —— 在启动器/批处理里设一次即可, 不必先
-//   找到配置目录、也不必让游戏成功启动过一次。
+// ⚠️ 为什么从"默认开启"退回"显式开启":
+//   实测两次崩溃都发生在自动安装这条路径上 —— 真机日志显示
+//   "Present 钩子自动安装(默认行为)" 之后紧接着目标进程以
+//   EXCEPTION_ACCESS_VIOLATION writing 挂掉。
+//   而同一个 findPresent 由**命令** `hook` 触发时是稳定的(用户手动执行时
+//   成功挂上并渲染了 33000+ 帧)。
+//
+//   差别在于调用线程: 自动安装跑在功能线程上, 而 findPresent 会建临时 D3D12
+//   设备与交换链 —— 这类调用隐含地要求特定的 COM/D3D 线程状态, 在自家线程上
+//   调用并不安全。命令版走的是 pipe 读线程, 恰好没踩到。
+//
+//   在把 findPresent 挪到安全线程之前, 默认开启等于"每次注入都赌一把目标进程
+//   的命"。这不可接受, 所以改为显式开启: 想要覆盖层就在注入后用
+//   `hook` 命令装上 —— 那条路已验证可用。
 bool autoHookAllowed() {
     char buf[8]{};
-    if (::GetEnvironmentVariableA("EPSILON_NO_AUTO_HOOK", buf, sizeof(buf)) > 0) {
-        const int v = ::atoi(buf);
-        // 只有明确写了非 0 才关闭; 设成 "0" 视为不关闭(便于脚本里条件设置)。
-        if (v != 0) return false;
+    if (::GetEnvironmentVariableA("EPSILON_AUTO_HOOK", buf, sizeof(buf)) > 0) {
+        if (::atoi(buf) != 0) return true;
     }
-    return true;
+    return false;
 }
 
 // 自动安装 Present 钩子。**每帧都调用**, 内部自己决定要不要真动手。
@@ -98,11 +106,14 @@ void maybeAutoInstallHook() {
     gAutoHookDone = true;
 
     if (!autoHookAllowed()) {
-        trace("Present 钩子自动安装已由 EPSILON_NO_AUTO_HOOK 关闭");
+        // 默认路径: 不自动装 Present 钩子。
+        // 想要覆盖层请注入后执行 `hook` —— 那条路已实测可用, 而自动安装在
+        // 功能线程上调用 findPresent 会导致目标进程崩溃(详见 autoHookAllowed)。
+        trace("Present 钩子未自动安装(默认); 需要覆盖层请执行 hook 命令");
         return;
     }
 
-    trace("Present 钩子自动安装(默认行为); 如需关闭请设 EPSILON_NO_AUTO_HOOK=1");
+    trace("Present 钩子自动安装(由 EPSILON_AUTO_HOOK 开启)");
 
     // 注意: 这一步内部会走 findPresent(临时 D3D12 交换链取 vtable)。
     // 放在功能线程而非启动路径上: 万一它把目标带走, 至少管道已连、日志已落盘,

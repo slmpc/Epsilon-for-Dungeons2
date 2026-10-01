@@ -17,7 +17,6 @@ void initModules() {
     if (!mgr.empty()) return;      // 已注册过
 
     // ---- player ----
-    // 顺序即 UI 里的显示顺序。
     mgr.add<JumpModule>();
     mgr.add<SpeedModule>();
 

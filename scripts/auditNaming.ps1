@@ -69,8 +69,21 @@ $allowed = @(
     # not ours, so they must not be camel-cased.
     '^Offset_Internal$',
     '^OnRep_', '^PlayerCharacter_C$', '^MovementSpeedMultiplier$',
+    # 目标游戏自己的类型名与蓝图类名(第三方命名, 必须保持原拼写)
+    '^ATR_',              # ATR_Movement 等 GAS 属性集
+    '^BP_',               # BP_AlexCharacter_C 等蓝图生成类
+    # STL 成员名(第三方)
+    '^emplace_back$',
     # nlohmann 的 optional 访问器 / Win32 标志
     '^has_value$', '^MOVEFILE_',
+    # more Win32 / STL / 项目自有名字
+    '^CTRL_',                 # CTRL_C_EVENT / CTRL_BREAK_EVENT / CTRL_CLOSE_EVENT
+    '^TH32CS_',               # Toolhelp32 快照标志
+    '^STILL_ACTIVE$', '^INVALID_FILE_ATTRIBUTES$', '^FOLDERID_', '^SIZE_MAX$',
+    '^notify_all$',           # std::condition_variable
+    '^parent_path$',          # std::filesystem
+    '^EPSILON_',              # 项目自有的环境变量名
+    '^epsilonPayload_no_autohook$',   # 项目自有的标记文件名
     # project-owned macros that intentionally keep SCREAMING_SNAKE_CASE
     '^EPSILON_PIPE_NAME$', '^EPSILON_TARGET_NO_CLEAR$', '^NOMINMAX$', '^_t$'
 )

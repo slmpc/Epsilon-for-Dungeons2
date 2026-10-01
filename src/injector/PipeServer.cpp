@@ -1,6 +1,4 @@
-// ============================================================================
-//  pipeServer.cpp
-// ============================================================================
+// PipeServer.cpp — InjectorChannel 的实现: 消息分发 + 就绪等待。
 #include "injector/PipeServer.h"
 #include "injector/Cli.h"
 
@@ -11,14 +9,9 @@
 namespace epsilon {
 
 bool InjectorChannel::start(uint32_t targetPid, std::wstring_view dllPath, std::string* error) {
-    // 约定名: 注入体用自己的 PID 加上自己的模块文件名算出同一个字符串,
-    // 两边零传递。槽位取自已注入的 DLL 文件名。
     const std::wstring slot = moduleSlotFromPath(dllPath);
     name_ = defaultPipeName(targetPid, slot);
 
-    // 管道名仍然写进目标环境块 —— 作为冗余通路保留。
-    // (实测 GetEnvironmentVariableW 未必反映被外部改写的 PEB, 所以
-    //  真正的可靠性来自上面的约定名; 这一步只是"能传就传"。)
     if (!pipe_.start(name_, [this](proto::Kind k, std::string_view b) { onMessage(k, b); },
                      [this] { onDisconnect(); }, error)) {
         return false;
@@ -70,14 +63,13 @@ void InjectorChannel::onDisconnect() {
 }
 
 bool InjectorChannel::waitReady(uint32_t timeoutMs) {
-    // 先等连接
+    // 先等连接, 再等 ready; 失败原因写进 last_error_ 供调用方直接打印。
     if (!pipe_.waitForClient(timeoutMs)) {
         last_error_ = "等注入体连接管道超时 —— DLL 可能已加载但初始化卡住/失败";
         return false;
     }
     connected_.store(true);
 
-    // 再等 ready 消息
     std::unique_lock lk(mu_);
     const bool ok = cv_.wait_for(lk, std::chrono::milliseconds(timeoutMs),
                                  [this] { return ready_.load() || !connected_.load(); });

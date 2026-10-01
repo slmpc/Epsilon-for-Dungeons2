@@ -1,6 +1,4 @@
-// ============================================================================
-//  cli.cpp
-// ============================================================================
+// Cli.cpp — 参数解析、进程列表与注入器控制台 UI 的实现。
 #include "injector/Cli.h"
 
 #include "common/PipeChannel.h"
@@ -22,7 +20,6 @@ constexpr std::string_view kProgram = "epsilonInjector";
 
 } // namespace
 
-// ---------------------------------------------------------------------------
 void printUsage() {
     outLine("");
     outColored(ansi::bold, "  epsilonInjector — Minecraft Dungeons II 热注入器 (RemoteThread)\n");
@@ -118,7 +115,6 @@ std::optional<Options> parseArgs(int argc, char** argv) {
     return o;
 }
 
-// ---------------------------------------------------------------------------
 void cmdList(std::string_view filter, bool verbose) {
     const auto procs = enumProcesses();
     outColored(ansi::bold, fmt("  进程列表 (共 {})\n", procs.size()));
@@ -167,7 +163,6 @@ std::optional<Target> pickTarget(Options const& opt) {
     return t;
 }
 
-// ---------------------------------------------------------------------------
 void uiBanner() {
     outColored(ansi::cyan, "\n  ============================================================\n");
     outColored(ansi::cyan,   "   Epsilon For Dungeons II 热注入器 — RemoteThread (CreateRemoteThread + LoadLibraryW)\n");
@@ -193,7 +188,6 @@ void uiPayloadError(std::string_view text) {
     outColored(ansi::red, fmt("  [注入体:错误] {}\n", text));
 }
 
-// ---------------------------------------------------------------------------
 bool interactiveShell(PipeServer& pipe) {
     outLine("");
     outColored(ansi::gray, "  输入命令后回车; 帮助输 help, 退出输 quit (或 Ctrl+C)。\n");
@@ -223,7 +217,6 @@ bool interactiveShell(PipeServer& pipe) {
         if (cmd.empty()) continue;
         if (cmd == "quit" || cmd == "exit") return false;
 
-        // 本地命令: 不以注入体为准
         if (cmd == "clear" || cmd == "cls") { ::system("cls"); continue; }
         if (cmd == "list") { cmdList("", false); continue; }
 

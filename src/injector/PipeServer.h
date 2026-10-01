@@ -1,6 +1,4 @@
-// ============================================================================
-//  pipeServer.h — 注入器侧的管道服务端 + 就绪等待
-// ============================================================================
+// PipeServer.h — 注入器侧的 InjectorChannel: 管道服务端 + 就绪等待。
 #pragma once
 
 #include "common/PipeChannel.h"
@@ -16,11 +14,9 @@ namespace epsilon {
 // 收集注入体回报的状态, 并把数据直接打到控制台。
 class InjectorChannel {
 public:
-    // 创建管道并开始等待注入体连接(非阻塞: 真正的 accept 在后台线程里)。
-    // targetPid 与 dllPath 一起推导约定管道名 EpsilonHotPipe2.<pid>.<slot> ——
-    // 注入体用自己的 PID 加自己的模块文件名算出同一个名字, 不依赖显式传递。
-    // 带 dllPath 槽位是为了让不同文件名的 DLL 能并存于同一进程 ——
-    // 这样改完代码可以换个 DLL 名字直接注入, 不必重启游戏。
+    // 非阻塞: 真正的 accept 在后台线程里。targetPid 与 dllPath 一起推导约定管道名
+    // EpsilonHotPipe2.<pid>.<slot> —— 注入体用同样的输入算出同名, 不依赖显式传递;
+    // 槽位让不同文件名的 DLL 能并存于同一进程, 改完代码换个名字即可注入。
     bool start(uint32_t targetPid, std::wstring_view dllPath, std::string* error = nullptr);
 
     // 等注入体报 ready。返回是否就绪。
@@ -33,7 +29,6 @@ public:
     [[nodiscard]] std::string const& lastError() const noexcept { return last_error_; }
     [[nodiscard]] std::wstring const& pipeName() const noexcept { return name_; }
 
-    // 下发一条命令。
     bool send(std::string_view command);
 
     PipeServer& pipe() noexcept { return pipe_; }

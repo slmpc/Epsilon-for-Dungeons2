@@ -1,16 +1,7 @@
-// ============================================================================
-//  pipeClient.cpp — 注入体的输出通道
-//
-//  ⚠️ 历史坑(务必保留这条注释):
-//    这里原本有一个模块级静态 PipeClient gPipe 用来连接, 而 payload.cpp 的
-//    emitNow() 往 Context::pipe 发送 —— **两个不同的对象**。
-//    结果是: 连接成功、日志显示"已连接注入器管道", 但每一次 send 都打到
-//    那个从没连接过的实例上, 于是返回 false, 注入器一条消息都收不到。
-//    症状极具误导性: 注入器→注入体 方向正常(命令能收到), 反向全丢。
-//
-//    现在统一到 ctx().pipe 这一个实例, 并由 ctx().pipeConnected 记状态。
-//    任何新增的收发路径都必须走它。
-// ============================================================================
+// PipeClient.cpp — 注入体输出通道实现
+// ⚠️ 所有收发路径都必须走 ctx().pipe 这一个实例(曾因存在第二个 PipeClient
+//    导致"连上了但发不出去"), 状态记在 ctx().pipeConnected。
+// 细节见 docs/payload/output.md
 #include "payload/PipeClient.h"
 
 #include "common/Text.h"
@@ -31,10 +22,7 @@ std::function<void()> gOnDisconnect;
 
 } // namespace
 
-// 从**本模块**的文件名推导槽位, 供管道名与单实例互斥体使用。
-// 用"本模块内某个函数的地址"反查模块句柄, 这样不必从 DllMain 把 hModule
-// 一路传下来 —— 注入体内部多处都要用它(管道、互斥体), 参数传递只会增加出错面。
-// 取不到时返回空串, 调用方退化为"只有 PID"的老名字。
+// 用"本模块内某个函数的地址"反查模块句柄, 免得把 hModule 一路传下来。
 std::wstring ownModuleSlot() {
     HMODULE h = nullptr;
     if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -54,23 +42,17 @@ bool connectInjectorPipe(uint32_t retryMs, std::string* error) {
 
     auto& c = ctx();
 
-    // 管道名 = 由本进程 PID + **本模块文件名**推导的约定名。
-    //   注入器用目标 PID 与被注入 DLL 的文件名算出同一个字符串, 注入体用
-    //   自己的 PID 与自己的模块名也得到它 —— 两端零传递。这是**唯一**的通路:
-    //   早先还试过用环境变量传递, 实测 GetEnvironmentVariableW 读不到被外部
-    //   改写的 PEB, 那条路从未生效, 已删除(连同注入器侧整个 PEB 改写代码)。
-    //   带上模块名是为了让不同文件名的注入体各用各的管道, 互不争抢。
+    // 管道名 = 本进程 PID + 本模块文件名; 注入器按同样规则算出同一个字符串。
     const std::wstring name = defaultPipeName(::GetCurrentProcessId(), ownModuleSlot());
 
     std::string err;
     if (!c.pipe.connect(name, retryMs, &err)) {
-        // 连不上就把管道子系统的状态一并报出来。对着真游戏排查时, 光一句
-        // "GetLastError=5" 完全不够 —— 分不清是"管道不存在/被占用", 还是
-        // "本进程被禁止创建/打开管道"。
+        // 失败时把管道子系统的状态一并报出来: 光一句 GetLastError 分不清是
+        // "管道不存在/被占用", 还是"本进程被禁止创建/打开管道"。
         const std::wstring full = pipeFullPath(name);
         std::string diag = fmt("管道连接失败: {}; 目标={}", err, toUtf8(full));
 
-        // 1) 本进程能不能创建管道? 能创建就说明不是全局被禁, 问题在打开那一侧。
+        // 本进程能不能创建管道? 能就说明不是全局被禁, 问题在打开那一侧。
         HANDLE srv = ::CreateNamedPipeW(
             pipeFullPath(name + L".probe").c_str(),
             PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 512, 512, 0, nullptr);
@@ -81,7 +63,7 @@ bool connectInjectorPipe(uint32_t retryMs, std::string* error) {
             diag += fmt("; 本进程可创建管道=否(err={})", ::GetLastError());
         }
 
-        // 2) 直接再打开一次, 单独记录错误码, 避免与重试逻辑的判定混淆。
+        // 直接再打开一次, 单独记录错误码, 避免与重试逻辑的判定混淆。
         HANDLE probe = ::CreateFileW(full.c_str(), GENERIC_READ | GENERIC_WRITE,
                                      0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (probe != INVALID_HANDLE_VALUE) {
@@ -116,8 +98,8 @@ bool pipeSend(proto::Kind kind, std::string_view payload) {
 }
 
 bool pipeStartCommandReader(std::function<void(std::string_view)> onCommand) {
-    // 注意: 回调在 reader 线程上执行, 所以这里绝不能持锁去调 startReader ——
-    // 回调里可能反过来调 pipeSend, 那样就是自己等自己。
+    // ⚠️ 回调在 reader 线程上执行, 所以这里绝不能持锁调 startReader ——
+    //    回调里可能反过来调 pipeSend, 那就是自己等自己。
     auto& c = ctx();
     if (!c.pipeConnected) return false;
 

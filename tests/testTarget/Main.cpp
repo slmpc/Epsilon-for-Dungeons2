@@ -1,18 +1,6 @@
-// ============================================================================
-//  testTarget/Main.cpp — 注入自测靶子
-//
-//  一个什么都不做的 x64 控制台进程。用途: 在不碰游戏的前提下验证
-//  「OpenProcess → VirtualAllocEx → WriteProcessMemory → CreateRemoteThread」
-//  整条链路, 以及注入体的输出通道切换。
-//
-//  用法:
-//    build/bin/epsilonTestTarget.exe
-//    build/bin/epsilonInjector.exe -n epsilonTestTarget.exe -i
-//
-//  它不加载 DXGI/D3D, 所以 Present 钩子一定失败 —— 这正好验证了"钩子失败
-//  不影响采集"这条设计。也不含 UE 反射, 所以引擎定位一定失败 —— 验证
-//  "注入成功但定位失败"时的降级路径不崩。
-// ============================================================================
+// testTarget/Main.cpp — 注入自测靶子: 一个什么都不做的 x64 控制台进程。
+// 不碰游戏验证整条注入链路(OpenProcess → VirtualAllocEx → WriteProcessMemory →
+// CreateRemoteThread → LoadLibraryW), 以及无 D3D / 无 UE 反射时的优雅降级。
 #include "common/Text.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -40,7 +28,6 @@ int main() {
     epsilon::outLine("");
     epsilon::outLine("  按 Ctrl+C 或关闭窗口退出。");
 
-    // 每 10 秒打一行心跳, 方便确认进程还活着 / 注入后有没有被搞崩。
     for (int i = 0;; ++i) {
         ::Sleep(10000);
         epsilon::outColored(epsilon::ansi::gray, epsilon::fmt("  [心跳 {}] 进程存活, 已运行 {} 秒\n",

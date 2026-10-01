@@ -1,23 +1,5 @@
-// ============================================================================
-//  pipeChannel.cpp — 双向命名管道消息通道
-//
-//  帧格式: [12 字节头][length 字节负载], 一次 WriteFile 写完整条消息。
-//
-//  实现要点(踩过的坑都在这):
-//    1. 用**字节模式**管道, 不用 PIPE_TYPE_MESSAGE。
-//       消息模式下 WriteFile 语义要求每次写完整消息, 且跨 WriteFile 的消息
-//       长度若超出缓冲区会被拒(ERROR_MORE_DATA 处理起来很碎)。
-//       字节模式 + "先 Peek 够整条再一次性读" 更简单也更稳:
-//       PeekNamedPipe 能告诉我们"当前可读多少字节", 而 PeekNamedPipe 带缓冲区
-//       时会把数据**拷贝出来但不消费**, 于是可以先看头拿到长度, 等负载到齐
-//       再一次性 ReadFile。完全避免半包。
-//    2. ConnectNamedPipe 必须放在**独立线程**里。
-//       它阻塞直到客户端连接。如果主线程同步调用, 调用方就永远等不到自己的
-//       超时逻辑 —— 之前注入器卡死就是这个原因。
-//    3. 停止时必须能打断阻塞中的 ConnectNamedPipe。
-//       Windows 的 ConnectNamedPipe 没有超时参数, 关句柄也未必可靠,
-//       所以 stop() 里往自己的管道发一次连接把它"顶"出来。这是标准做法。
-// ============================================================================
+// PipeChannel.cpp — 管道消息通道实现。帧格式: [12 字节头][length 字节负载], 一次
+// WriteFile 写完整条消息; 用字节模式管道 + PeekNamedPipe 凑齐整条再读, 避免半包。
 #include "common/PipeChannel.h"
 #include "common/Text.h"
 
@@ -49,10 +31,7 @@ std::wstring utf8ToWideLocal(std::string_view s) {
     return w;
 }
 
-// 探测管道上是否已有**一条完整消息**。
-//   返回 SIZE_MAX = 管道出错/断开(调用方应结束)
-//   返回 0        = 暂时没有完整消息(调用方应稍后再看)
-//   返回 n        = 一条完整消息的总字节数(头 + 负载)
+// 探测管道上是否已有一条完整消息: SIZE_MAX = 出错/断开, 0 = 还不完整, n = 消息总字节数。
 size_t pendingMessageSize(HANDLE pipe) {
     DWORD avail = 0;
     if (!::PeekNamedPipe(pipe, nullptr, 0, nullptr, &avail, nullptr)) return SIZE_MAX;
@@ -68,7 +47,7 @@ size_t pendingMessageSize(HANDLE pipe) {
     if (hdr.length > proto::maxPayload) return SIZE_MAX;
 
     const size_t total = sizeof(proto::Header) + hdr.length;
-    if (avail < total) return 0;      // 负载还没写全, 等下一轮
+    if (avail < total) return 0;
     return total;
 }
 
@@ -130,7 +109,7 @@ std::wstring moduleSlotFromPath(std::wstring_view pathOrName) {
         }
     }
 
-    // 只保留字母数字: 这个名字会进管道名与互斥体名, 不引入奇怪字符。
+    // 只留字母数字 —— 这个名字会进管道名与互斥体名。
     std::wstring out;
     out.reserve(base.size());
     for (wchar_t c : base) {
@@ -144,13 +123,10 @@ std::wstring moduleSlotFromPath(std::wstring_view pathOrName) {
 
 std::wstring defaultPipeName(uint32_t targetPid, std::wstring_view slot) {
     wchar_t buf[160]{};
-    // 前缀换过一次: 老名字 EpsilonHotInject.<pid> 在真游戏上稳定拿到
-    // ACCESS_DENIED, 怀疑是名字层面的残留/冲突, 换个全新前缀排除这个变量。
     const std::wstring s(slot);
     if (s.empty()) {
         ::swprintf_s(buf, L"EpsilonHotPipe2.%u", targetPid);
     } else {
-        // slot 已过滤为字母数字, 不存在格式化风险。
         ::swprintf_s(buf, L"EpsilonHotPipe2.%u.%s", targetPid, s.c_str());
     }
     return buf;
@@ -162,9 +138,6 @@ std::wstring pipeFullPath(std::wstring_view name) {
     return p;
 }
 
-// ===========================================================================
-//  PipeServer (注入器侧)
-// ===========================================================================
 PipeServer::~PipeServer() { stop(); }
 
 bool PipeServer::start(std::wstring const& pipeName, MessageHandler onMessage,
@@ -177,13 +150,13 @@ bool PipeServer::start(std::wstring const& pipeName, MessageHandler onMessage,
     stopping_ = false;
     connected_ = false;
 
-    // 字节模式(PIPE_TYPE_BYTE)+ PIPE_WAIT: 见文件头注释。
+    // 字节模式 + PIPE_WAIT: 消息模式下的半包处理不划算(见文件头)。
     const std::wstring full = pipeFullPath(name_);
     HANDLE h = ::CreateNamedPipeW(
         full.c_str(),
         PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        1,                  // 一次注入只需要一个实例
+        1,
         bufSize, bufSize,
         0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
@@ -200,9 +173,7 @@ bool PipeServer::start(std::wstring const& pipeName, MessageHandler onMessage,
         return false;
     }
 
-    // 线程函数里会用到 CRT(std::string / std::format / std::mutex), 所以必须用
-    // _beginthreadex 而不是 CreateThread —— 后者不会为该线程初始化 CRT 的
-    // 线程级状态。在静态链接 CRT 的 DLL 里这一点尤其要命。
+    // 线程里会用 CRT(std::string / std::format / std::mutex), 必须 _beginthreadex 而非 CreateThread。
     uintptr_t t = _beginthreadex(
         nullptr, 0,
         reinterpret_cast<unsigned(__stdcall*)(void*)>(&acceptorTrampoline),
@@ -223,16 +194,14 @@ unsigned long __stdcall PipeServer::acceptorTrampoline(void* self) {
 }
 
 void PipeServer::acceptorLoop() {
-    // ---- 1) 等客户端连接 ----
     const BOOL ok = ::ConnectNamedPipe(asHandle(pipe_), nullptr);
     const DWORD err = ::GetLastError();
 
-    // ERROR_PIPE_CONNECTED: 客户端在 ConnectNamedPipe 之前就来了 —— 同样是成功。
     const bool connected = ok || err == ERROR_PIPE_CONNECTED;
     if (!connected || stopping_.load(std::memory_order_acquire)) {
         if (!stopping_.load()) {
             connected_.store(false);
-            ::SetEvent(asHandle(connectedEvent_));   // 让等待方别干等到超时
+            ::SetEvent(asHandle(connectedEvent_));
             if (on_disconnect_) on_disconnect_();
         }
         return;
@@ -241,10 +210,8 @@ void PipeServer::acceptorLoop() {
     connected_.store(true, std::memory_order_release);
     ::SetEvent(asHandle(connectedEvent_));
 
-    // ---- 2) 进入读循环 ----
     readerLoop();
 
-    // ---- 3) 断开 ----
     const bool wasConnected = connected_.exchange(false);
     if (wasConnected && on_disconnect_) on_disconnect_();
 }
@@ -253,9 +220,9 @@ void PipeServer::readerLoop() {
     std::vector<char> buf(bufSize);
     while (!stopping_.load(std::memory_order_acquire)) {
         const size_t avail = pendingMessageSize(asHandle(pipe_));
-        if (avail == SIZE_MAX) break;          // 出错/断开
+        if (avail == SIZE_MAX) break;
         if (avail == 0) {
-            // 没有完整消息。用 stop_event 做可中断的小睡, 避免空转烧 CPU。
+            // 可中断的小睡, 避免空转烧 CPU。
             if (::WaitForSingleObject(asHandle(stopEvent_), 15) == WAIT_OBJECT_0) break;
             continue;
         }
@@ -270,7 +237,6 @@ void PipeServer::readerLoop() {
 bool PipeServer::waitForClient(uint32_t timeoutMs) {
     if (!pipe_ || !connectedEvent_) return false;
 
-    // 连接由 acceptor 线程负责, 这里只等它把事件点亮 —— 所以超时是可靠的。
     HANDLE waits[2] = {asHandle(connectedEvent_), asHandle(stopEvent_)};
     const DWORD w = ::WaitForMultipleObjects(2, waits, FALSE, timeoutMs);
     if (w == WAIT_OBJECT_0) return connected_.load(std::memory_order_acquire);
@@ -300,15 +266,14 @@ void PipeServer::stop() {
     stopping_.store(true, std::memory_order_release);
     if (stopEvent_) ::SetEvent(asHandle(stopEvent_));
 
-    // 关键: acceptor 可能正阻塞在 ConnectNamedPipe 上。
-    // Windows 上它没有超时参数, 关句柄的行为也没保证, 所以往自己管道发一次
-    // 连接把这个调用"顶"出去 —— 一旦连上, ConnectNamedPipe 立刻返回。
+    // acceptor 可能正阻塞在 ConnectNamedPipe 上, 而它没有超时参数: 往自己的管道
+    // 发一次连接把该调用"顶"出来, 否则 stop() 会挂住。
     if (pipe_ && !connected_.load(std::memory_order_acquire)) {
         HANDLE self = ::CreateFileW(pipeFullPath(name_).c_str(),
                                     GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                                     OPEN_EXISTING, 0, nullptr);
         if (self != INVALID_HANDLE_VALUE) {
-            ::WaitForSingleObject(asHandle(acceptor_), 500);   // 等 acceptor 退出
+            ::WaitForSingleObject(asHandle(acceptor_), 500);
             ::CloseHandle(self);
         }
     }
@@ -322,9 +287,6 @@ void PipeServer::stop() {
     connected_.store(false);
 }
 
-// ===========================================================================
-//  PipeClient (注入体侧)
-// ===========================================================================
 PipeClient::~PipeClient() { close(); }
 
 bool PipeClient::connect(std::wstring const& pipeName, uint32_t retryMs, std::string* error) {
@@ -356,8 +318,7 @@ bool PipeClient::connect(std::wstring const& pipeName, uint32_t retryMs, std::st
 }
 
 bool PipeClient::send(proto::Kind kind, std::string_view payload) {
-    // 注入体会从多个线程发消息(命令响应 / 帧回调 / 日志), 必须串行化,
-    // 否则两次 WriteFile 会交错成垃圾。
+    // 注入体会从多个线程发消息, 必须串行化, 否则两次 WriteFile 会交错成垃圾。
     static std::mutex wmu;
     std::lock_guard lk(wmu);
     if (!pipe_) return false;
@@ -391,7 +352,7 @@ unsigned long __stdcall PipeClient::readerTrampoline(void* self) {
 bool PipeClient::startReader(std::function<void(proto::Kind, std::string_view)> onMessage) {
     if (!pipe_) return false;
     on_message_ = std::move(onMessage);
-    // 同上: 读线程里会构造 std::function / 派发命令行, 用 _beginthreadex。
+    // 同上: 读线程也碰 CRT, 用 _beginthreadex。
     uintptr_t t = _beginthreadex(
         nullptr, 0,
         reinterpret_cast<unsigned(__stdcall*)(void*)>(&readerTrampoline),
@@ -406,7 +367,7 @@ void PipeClient::readerLoop() {
     std::vector<char> buf(bufSize);
     for (;;) {
         const size_t avail = pendingMessageSize(asHandle(pipe_));
-        if (avail == SIZE_MAX) break;             // 出错/断开
+        if (avail == SIZE_MAX) break;
         if (avail == 0) {
             if (::WaitForSingleObject(asHandle(stopEvent_), 15) == WAIT_OBJECT_0) break;
             continue;

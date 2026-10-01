@@ -10,9 +10,8 @@
 
 namespace epsilon::feature {
 
-// 日志辅助在 epsilon::payload 命名空间里(见 Payload.h)。本文件在
-// epsilon::feature 下, 不引入 using namespace —— 那会把 payload 的一大堆
-// 符号灌进来, 而这些文件只需要三个日志函数。
+// 日志辅助在 epsilon::payload 命名空间里(见 Payload.h)。只引这三个函数,
+// 不用 using namespace —— 那会把 payload 的全部符号灌进来。
 using epsilon::payload::logInfo;
 using epsilon::payload::logWarn;
 using epsilon::payload::logError;
@@ -26,8 +25,7 @@ std::string ModuleManager::normalizeKey(std::string_view name) {
     std::string out;
     out.reserve(name.size());
     for (char c : name) {
-        // 空格/下划线/连字符一律去掉再做小写: "Auto Sprint" / "auto_sprint" /
-        // "AutoSprint" 会归一到同一个键, 手改配置时不至于因为写法不同就找不到。
+        // 空格/下划线/连字符与大小写一律归一到同一个键, 手改配置不至于找不到。
         if (c == ' ' || c == '_' || c == '-') continue;
         out += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
@@ -87,8 +85,7 @@ size_t ModuleManager::enabledCount() const noexcept {
 }
 
 void ModuleManager::disableAll() {
-    // 遍历副本: onDisable 里有可能去碰注册表(比如联动关掉别的模块), 直接
-    // 遍历 modules_ 会让迭代器失效。
+    // 遍历副本: onDisable 里可能去碰注册表, 直接遍历 modules_ 会让迭代器失效。
     const auto snapshot = modules_;
     for (auto* m : snapshot) {
         if (m && m->isEnabled()) m->setEnabled(false);
@@ -101,9 +98,9 @@ void ModuleManager::disableAll() {
 bool ModuleManager::dispatchKeyEvent(int32_t vk, bool pressed) {
     if (vk < 0) return false;
 
-    // 第一步: 收集本次事件涉及的模块, 并先判断是否有模块因此被启用。
-    // 必须先收集再改状态 —— 在遍历过程中改 enabled 会让后面的模块看到
-    // 已经变化的世界, Toggle/Hold 的语义就乱了。
+    // 第一步: 收集本次事件涉及的模块, 并判断是否有模块因此被启用。
+    // ★ 必须先收集再改状态 —— 遍历中改 enabled 会让后面的模块看到已变化的
+    // 世界, Toggle/Hold 的语义就乱了。
     std::vector<Module*> affected;
     bool anyEnabling = false;
 
@@ -128,10 +125,8 @@ bool ModuleManager::dispatchKeyEvent(int32_t vk, bool pressed) {
     if (affected.empty()) return false;
 
     // 第二步: 应用状态变更。
-    //
-    // 通知文案按"这次事件是启用还是禁用"来选: affected 里所有成员的方向都
-    // 是一致的 —— Toggle 只在按下时进入, Hold 只会要么全按下要么全抬起,
-    // 所以用 anyEnabling 一个标志就够, 不需要逐个判断。
+    // affected 里所有成员的方向一致(Toggle 只在按下时进入, Hold 要么全按下
+    // 要么全抬起), 所以一个标志就够。
     const bool enabling = anyEnabling;
     for (auto* m : affected) {
         if (m->bindMode() == Module::BindMode::toggle) {
@@ -140,19 +135,15 @@ bool ModuleManager::dispatchKeyEvent(int32_t vk, bool pressed) {
             m->setEnabled(pressed);
         }
 
-        // 按键切换也走通知, 与 Open-Epsilon 一致: 玩家用热键开关模块时
-        // 同样需要看到反馈。
+        // 按键切换也走通知: 用热键开关模块时同样需要看到反馈。
         logInfo(fmt("模块 [{}] 已{}", m->name(), enabling ? "启用" : "禁用"));
     }
 
-    // 第三步: 让模块有机会自行消费这次按键(比如模块自己也在监听某个键)。
-    // 放在状态变更之后, 这样模块看到的是自己最新的启用状态。
-    //
-    // 先让受影响模块处理, 未消费再问全部已启用模块 —— 这样一个没绑键但需要
-    // 观察按键的模块(如宏录制)也能收到事件。
-    //
-    // 返回值的语义见头文件: 只要"有模块绑定了这个键并因此动作了", 就算已处理。
-    // 绑定本身就是一种处理 —— 宿主据此决定不再把按键交给游戏。
+    // 第三步: 让模块有机会自行消费这次按键。放在状态变更之后, 模块看到的
+    // 就是自己最新的启用状态。
+    // 先问受影响模块, 未消费再问全部已启用模块 —— 一个没绑键但需要观察按键
+    // 的模块(如宏录制)也能收到事件。
+    // 返回值的语义见头文件: 只要"有模块绑定了这个键并因此动作了"就算已处理。
     bool consumed = false;
     for (auto* m : affected) {
         if (m->onKeyEvent(vk, pressed)) consumed = true;
@@ -162,14 +153,13 @@ bool ModuleManager::dispatchKeyEvent(int32_t vk, bool pressed) {
             if (m && m->isEnabled() && m->onKeyEvent(vk, pressed)) consumed = true;
         }
     }
-    // affected 非空说明确实有模块绑了(或正在响应)这个键。
+    // affected 非空即说明确实有模块绑了(或正在响应)这个键, 算已处理。
     return consumed || !affected.empty();
 }
 
 void ModuleManager::onFrame() {
     for (auto* m : modules_) {
-        // 只驱动已启用的模块。让每个模块自己判 isEnabled() 会把同样的判断
-        // 抄到每一份实现里, 而且很容易漏。
+        // 只驱动已启用的模块, 免得每份实现各自重判 isEnabled() 还漏掉。
         if (m && m->isEnabled()) m->onFrame();
     }
 }
@@ -189,8 +179,7 @@ nlohmann::json ModuleManager::toJson() const {
 void ModuleManager::fromJson(nlohmann::json const& in) {
     if (!in.is_object()) return;
 
-    // 遍历 json, 只应用**已注册**的模块。配置里有、代码里没有的条目直接跳过
-    // (删掉一个模块后残留的配置不该报错, 也不该被当成分类错误)。
+    // 只应用**已注册**的模块: 配置里有、代码里没有的条目直接跳过。
     for (auto it = in.begin(); it != in.end(); ++it) {
         auto* m = find(it.key());
         if (!m) continue;
@@ -198,8 +187,7 @@ void ModuleManager::fromJson(nlohmann::json const& in) {
         try {
             m->fromJson(it.value());
         } catch (std::exception const& e) {
-            // 单个模块读失败不能连累其它模块 —— 注入体里异常穿出去会让游戏
-            // 处于半初始化状态, 比"这个模块还是默认值"糟糕得多。
+            // 单个模块读失败不能连累其它模块, 更不能把异常放出去。
             logWarn(fmt("模块 [{}] 配置加载失败: {}", m->name(), e.what()));
         } catch (...) {
             logWarn(fmt("模块 [{}] 配置加载失败(未知错误)", m->name()));

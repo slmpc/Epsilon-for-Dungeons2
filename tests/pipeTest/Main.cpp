@@ -1,17 +1,6 @@
-// ============================================================================
-//  pipe_test — 命名管道双向收发的最小验证
-//
-//  背景: 注入链路里出现了一个奇怪现象 ——
-//      注入器 → 注入体 方向正常(注入体收到了 quit 命令)
-//      注入体 → 注入器 方向完全收不到(注入器一条消息都没打印)
-//  在注入链路里排查这件事成本很高(要起靶子、注入、读落盘日志), 所以这里
-//  把 PipeServer / PipeClient 单独拎出来跑一遍, 直接定位是通道代码的问题
-//  还是注入环境的问题。
-//
-//  用法(两个进程):
-//      pipe_test.exe server            打印 pid 后等客户端
-//      pipe_test.exe client <serverpid> 连过去, 收发若干条
-// ============================================================================
+// pipeTest/Main.cpp — 命名管道双向收发的最小验证(把 PipeServer / PipeClient 单独拎出来跑)。
+// 注入链路里排查"某方向收不到消息"成本很高, 这里能直接判定是通道代码的问题还是注入环境的问题。
+// 用法(两个进程): pipe_test.exe server 打印 pid 后等客户端; pipe_test.exe client <serverpid>。
 #include "common/PipeChannel.h"
 #include "common/Text.h"
 
@@ -73,7 +62,6 @@ int runServer() {
     }
     outColored(ansi::green, "[server] 客户端已连接\n");
 
-    // 给客户端一点时间把消息写完
     for (int i = 0; i < 20; ++i) {
         ::Sleep(100);
         if (got.load() >= 3) break;
@@ -109,14 +97,12 @@ int runClient(uint32_t serverPid) {
     }
     outColored(ansi::green, "[client] 已连接\n");
 
-    // 复刻注入体的发送序列
     struct Hello { uint32_t pid; uint64_t base; char tag[8]; };
     Hello h{::GetCurrentProcessId(), 0xDEADBEEF, {'t','e','s','t'}};
     outLine(fmt("[client] send hello  -> {}", cli.sendPod(proto::Kind::hello, h)));
     outLine(fmt("[client] send ready  -> {}", cli.send(proto::Kind::ready, "ready")));
     outLine(fmt("[client] send status -> {}", cli.send(proto::Kind::status, "定位中...")));
 
-    // 收服务端下发的命令
     outLine("[client] 等待 command ...");
     for (int i = 0; i < 10; ++i) {
         proto::Kind k{};

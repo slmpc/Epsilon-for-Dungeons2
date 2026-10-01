@@ -1,6 +1,4 @@
-// ============================================================================
-//  text.cpp
-// ============================================================================
+// Text.cpp — 控制台/日志输出实现; 所有写入直接走句柄, 不经 CRT 缓冲。
 #include "common/Text.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -17,13 +15,12 @@ namespace {
 
 HANDLE gStdout = nullptr;
 HANDLE gStderr = nullptr;
-HANDLE gLog    = INVALID_HANDLE_VALUE;   // out()/err() 的镜像文件
+HANDLE gLog    = INVALID_HANDLE_VALUE;
 bool   gVt     = false;
 bool   gColor  = true;
 bool   gInited = false;
 
-// 一次性初始化句柄。注意: 注入体所在的游戏进程是 GUI 子系统, 标准句柄可能为 0,
-// 此时 rawWrite 会静默丢弃 —— 这正是我们要的行为(不能因为没控制台就崩)。
+// 游戏进程是 GUI 子系统, 标准句柄可能为 0; 此时 rawWrite 静默丢弃而不是崩。
 void ensureInit() noexcept {
     if (gInited) return;
     gInited = true;
@@ -57,11 +54,10 @@ const char* tagFor(Level lv) noexcept {
 
 } // namespace
 
-// ---------------------------------------------------------------------------
 bool consoleInit(bool enableVt) noexcept {
     ensureInit();
 
-    // CRT 侧也切到 UTF-8, 免得 std::format 出来的中文被按 ANSI 码页截断。
+    // CRT 侧也切 UTF-8, 否则中文会被按 ANSI 码页截断。
     ::SetConsoleOutputCP(CP_UTF8);
     ::SetConsoleCP(CP_UTF8);
 
@@ -87,7 +83,6 @@ bool consoleAttached() noexcept {
 void setColorEnabled(bool on) noexcept { gColor = on; }
 bool colorEnabled() noexcept { return gColor && gVt; }
 
-// ---------------------------------------------------------------------------
 void rawWrite(void* handle, std::string_view s) noexcept {
     if (!handle || s.empty()) return;
     auto h = static_cast<HANDLE>(handle);
@@ -97,7 +92,6 @@ void rawWrite(void* handle, std::string_view s) noexcept {
         DWORD written = 0;
         // 管道/重定向下 WriteFile 可能部分写入, 必须循环。
         if (!::WriteFile(h, p, static_cast<DWORD>(left), &written, nullptr)) {
-            // 控制台被关掉会 ERROR_INVALID_HANDLE —— 直接放弃, 不抛异常。
             if (::GetLastError() == ERROR_INVALID_HANDLE) return;
             return;
         }
@@ -164,7 +158,6 @@ void log(Level lv, std::string_view msg) noexcept {
     if (lv == Level::error) err(line); else out(line);
 }
 
-// ---------------------------------------------------------------------------
 std::string hex(uint64_t v, int width) {
     std::string s = std::format("0x{:X}", v);
     if (width > 0 && static_cast<int>(s.size()) < width) {
@@ -189,8 +182,6 @@ std::string humanBytes(uint64_t v) {
     return i == 0 ? std::format("{} B", v) : std::format("{:.2f} {}", d, unit[i]);
 }
 
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
 std::string toUtf8(std::wstring_view w) {
     if (w.empty()) return {};
     const int n = ::WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
@@ -267,10 +258,10 @@ std::string stripUePrefix(std::string_view name) {
     if (name.size() >= 2) {
         const char c0 = name[0];
         const char c1 = name[1];
-        const bool prefix_like = (c0 == 'A' || c0 == 'U' || c0 == 'F' || c0 == 'E' ||
+        const bool prefixLike = (c0 == 'A' || c0 == 'U' || c0 == 'F' || c0 == 'E' ||
                                   c0 == 'I' || c0 == 'T');
-        const bool rest_ok = (c1 >= 'A' && c1 <= 'Z');
-        if (prefix_like && rest_ok) return std::string(name.substr(1));
+        const bool restOk = (c1 >= 'A' && c1 <= 'Z');
+        if (prefixLike && restOk) return std::string(name.substr(1));
     }
     return std::string(name);
 }
@@ -287,7 +278,6 @@ std::string sanitize(std::string_view s, size_t maxLen) {
     return r;
 }
 
-// ---------------------------------------------------------------------------
 std::string hexdump(const uint8_t* data, size_t len, uint64_t baseVa, size_t maxBytes) {
     if (!data || len == 0) return "(空)\n";
     const size_t n = (maxBytes && len > maxBytes) ? maxBytes : len;

@@ -1,22 +1,5 @@
-// ============================================================================
-//  procUtil.cpp — RemoteThread 注入的实现细节
-//
-//  注入序列(每一步的失败都能单独报出来, 便于定位是哪一环被拦):
-//    1. 本地确认 DLL 存在
-//    2. OpenProcess(PROCESS_CREATE_THREAD | QUERY_INFORMATION |
-//                   PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ)
-//       —— 最小必要权限集合, 不是 PROCESS_ALL_ACCESS
-//    3. 确认目标不是 WOW64(32 位)
-//    4. VirtualAllocEx 分配存放 DLL 路径(Unicode)的内存
-//    5. WriteProcessMemory 写入路径
-//    6. GetProcAddress(kernel32!LoadLibraryW)
-//       —— kernel32 在每个进程里的基址相同(同一会话内), 所以本地函数指针
-//          在目标进程里同样有效, 这正是远程线程注入成立的基石
-//    7. CreateRemoteThread(lpStartAddress = LoadLibraryW, lpParameter = Str)
-//       —— LoadLibraryW 的参数是 LPCWSTR 且返回 HMODULE, 与
-//          LPTHREAD_START_ROUTINE 的签名(LPVOID)->DWORD 在 x64 ABI 上完全兼容
-//    8. WaitForSingleObject + GetExitCodeThread → 远端 HMODULE
-// ============================================================================
+// ProcUtil.cpp — RemoteThread(LoadLibraryW) 注入实现: OpenProcess → VirtualAllocEx
+// → WriteProcessMemory → CreateRemoteThread → WaitForSingleObject, 每步失败单独上报。
 #include "common/ProcUtil.h"
 #include "common/Text.h"
 
@@ -73,7 +56,7 @@ std::wstring utf8ToWide(std::string_view s) {
     return w;
 }
 
-std::string base_name_of(std::string_view path) {
+std::string baseNameOf(std::string_view path) {
     const size_t pos = path.find_last_of("\\/");
     return std::string(pos == std::string_view::npos ? path : path.substr(pos + 1));
 }
@@ -97,7 +80,6 @@ std::string_view statusToString(InjectStatus s) {
     return "未知";
 }
 
-// ---------------------------------------------------------------------------
 std::vector<ProcInfo> enumProcesses() {
     std::vector<ProcInfo> out;
     Handle snap(::CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
@@ -170,7 +152,7 @@ std::string processNameOf(uint32_t pid) {
     wchar_t buf[MAX_PATH * 2]{};
     DWORD n = static_cast<DWORD>(std::size(buf));
     if (!::QueryFullProcessImageNameW(h.h, 0, buf, &n)) return {};
-    return base_name_of(wideToUtf8(std::wstring_view(buf, n)));
+    return baseNameOf(wideToUtf8(std::wstring_view(buf, n)));
 }
 
 std::string processPathOf(uint32_t pid) {
@@ -192,7 +174,6 @@ bool isWow64Process(uint32_t pid) {
     return false;
 }
 
-// ---------------------------------------------------------------------------
 uint64_t remoteAlloc(uint32_t pid, size_t size, uint32_t protect) {
     Handle h(::OpenProcess(PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, pid));
     if (!h) return 0;
@@ -228,11 +209,10 @@ bool remoteReadable(uint32_t pid, uint64_t addr, size_t size) {
     if (::VirtualQueryEx(h.h, reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) == 0) return false;
     if (mbi.State != MEM_COMMIT) return false;
     if (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) return false;
-    const uint64_t region_end = reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize;
-    return addr + size <= region_end;
+    const uint64_t regionEnd = reinterpret_cast<uint64_t>(mbi.BaseAddress) + mbi.RegionSize;
+    return addr + size <= regionEnd;
 }
 
-// ---------------------------------------------------------------------------
 InjectResult injectDll(uint32_t pid, std::string const& dllPath, InjectOptions const& opt) {
     InjectResult r;
     const ULONGLONG t0 = ::GetTickCount64();
@@ -266,7 +246,6 @@ InjectResult injectDll(uint32_t pid, std::string const& dllPath, InjectOptions c
         return r;
     }
 
-    // ---- 1) 在目标里分配存放路径的内存 ----
     const size_t bytes = (wpath.size() + 1) * sizeof(wchar_t);
     const uint64_t remoteStr = remoteAlloc(pid, bytes, PAGE_READWRITE);
     if (!remoteStr) {
@@ -276,7 +255,6 @@ InjectResult injectDll(uint32_t pid, std::string const& dllPath, InjectOptions c
     }
     r.remoteString = remoteStr;
 
-    // ---- 2) 把路径写进去 ----
     if (!remoteWrite(pid, remoteStr, wpath.c_str(), bytes)) {
         r.status = InjectStatus::writeFailed;
         r.win32Error = ::GetLastError();
@@ -285,8 +263,7 @@ InjectResult injectDll(uint32_t pid, std::string const& dllPath, InjectOptions c
         return r;
     }
 
-    // ---- 3) 取 LoadLibraryW 的地址 ----
-    // kernel32.dll 在同一会话的所有进程里基址相同, 所以这个指针在目标里也有效。
+    // kernel32 在同一会话的所有进程里基址相同, 所以这个指针在目标里也有效。
     const HMODULE k32 = ::GetModuleHandleW(L"kernel32.dll");
     if (!k32) {
         r.status = InjectStatus::moduleNotFound;
@@ -304,7 +281,6 @@ InjectResult injectDll(uint32_t pid, std::string const& dllPath, InjectOptions c
         return r;
     }
 
-    // ---- 4) 远程线程 ----
     Handle th(::CreateRemoteThread(h.h, nullptr, 0,
                                    reinterpret_cast<LPTHREAD_START_ROUTINE>(loadLibrary),
                                    reinterpret_cast<LPVOID>(remoteStr), 0, nullptr));
@@ -316,11 +292,10 @@ InjectResult injectDll(uint32_t pid, std::string const& dllPath, InjectOptions c
         return r;
     }
 
-    // ---- 5) 等 LoadLibrary 返回 ----
     const DWORD wait = ::WaitForSingleObject(th.h, opt.timeoutMs);
     if (wait == WAIT_TIMEOUT) {
         r.status = InjectStatus::remoteTimeout;
-        // 线程还在跑, 绝不能释放 Str —— 会让远端踩空指针导致目标崩溃。
+        // 线程还在跑, 绝不能释放参数串 —— 会让远端踩空指针导致目标崩溃。
         r.detail = "远端线程未在超时内结束; 已保留参数字符串以免目标踩空指针";
         r.elapsedMs = static_cast<uint32_t>(::GetTickCount64() - t0);
         return r;

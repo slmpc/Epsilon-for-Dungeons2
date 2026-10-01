@@ -1,19 +1,6 @@
-// ============================================================================
-//  d3d12_target — D3D12 渲染靶子
-//
-//  用途: 在没有游戏的情况下验证 Present 钩子与 ImGui 覆盖层。
-//  它建一个真实窗口 + D3D12 设备 + 翻转模型交换链, 然后一直渲染。
-//
-//  与 epsilonTestTarget 的区别:
-//    epsilonTestTarget  什么都不做, 验证"注入链路 + 无 D3D 时的优雅降级"
-//    d3d12_target     真实出帧, 验证"Present 钩子 + 覆盖层渲染"
-//
-//  用法:
-//    先跑它, 然后注入:
-//      .\build\release\bin\epsilonInjector.exe -n d3d12_target.exe --exec hook
-//      (注入器会自动建管道, 不需要交互)
-//    窗口里会出现覆盖层, 按 Insert 开关。
-// ============================================================================
+// d3d12Target/Main.cpp — D3D12 渲染靶子: 真实窗口 + D3D12 设备 + 翻转模型交换链, 一直出帧。
+// 没有游戏在跑时用它验证 Present 钩子与 ImGui 覆盖层(注入方式见程序启动时的打印)。
+// 与 testTarget 的分工: testTarget 验注入链路与无 D3D 时的降级, 本靶子验真实出帧的渲染路径。
 #include "common/Text.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -58,9 +45,8 @@ LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return ::DefWindowProcW(h, m, w, l);
 }
 
-// 注意: 不要把 "调用" 和 "检查结果" 塞进同一个函数调用的实参里 ——
-// C++ 未规定实参求值顺序, MSVC 是从右往左, 于是出参会在调用发生之前被读走,
-// 拿到永远是 null 的旧值。必须拆成两条语句。
+// 注意: 不要把"调用"和"检查结果"塞进同一个调用的实参 —— C++ 未规定实参求值顺序,
+// MSVC 从右往左, 出参会在调用发生前被读走, 拿到永远是 null 的旧值。必须拆成两条语句。
 template <typename T>
 bool ok(HRESULT hr, T* p, char const* what) {
     if (FAILED(hr) || !p) {
@@ -90,7 +76,6 @@ bool initD3d12() {
         if (!ok(hr, gQueue, "CreateCommandQueue")) return false;
     }
 
-    // 交换链(翻转模型)
     IDXGIFactory4* factory = nullptr;
     {
         const HRESULT hr = ::CreateDXGIFactory1(__uuidof(IDXGIFactory4),
@@ -115,9 +100,8 @@ bool initD3d12() {
         factory->Release();
         if (!ok(hr, sc1, "CreateSwapChainForHwnd")) return false;
     }
-    gSwapchain = static_cast<IDXGISwapChain3*>(sc1);   // 1→3 是同一对象, 直接转
+    gSwapchain = static_cast<IDXGISwapChain3*>(sc1);
 
-    // RTV 堆
     {
         D3D12_DESCRIPTOR_HEAP_DESC rh{};
         rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -175,9 +159,7 @@ void renderOneFrame() {
     rtv.ptr += static_cast<SIZE_T>(idx) * gRtvInc;
     gList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
-    // 底色随时间轻微变化, 让人一眼看出还在出帧。
-    // 设 EPSILON_TARGET_NO_CLEAR=1 可跳过清屏 —— 用来判定"覆盖层看不见"到底是
-    // 渲染没生效, 还是被游戏这一帧的清屏盖掉了。
+    // EPSILON_TARGET_NO_CLEAR=1 跳过清屏, 用来判定"覆盖层看不见"是渲染没生效还是被清屏盖掉。
     static const bool noClear = [] {
         wchar_t v[8]{};
         return ::GetEnvironmentVariableW(L"EPSILON_TARGET_NO_CLEAR", v, 8) > 0;

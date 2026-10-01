@@ -27,10 +27,8 @@ using epsilon::payload::logInfo;
 using epsilon::payload::logWarn;
 
 // 正在等待用户按键的改键目标。
-//
-// 早先这里只存了一个 KeybindSetting*, 而模块自身的"热键"那一行是临时构造的
-// KeybindSetting —— 把它交给下一帧的按键回调就是一个悬垂指针。所以这里明确
-// 区分两种目标: 模块热键, 或模块内部的键位设置。
+// 明确区分"模块热键"与"模块内部的键位设置": 模块热键直接操作 Module, 不经过
+// 临时构造的 KeybindSetting(那会变成下一帧的悬垂指针)。
 struct CaptureTarget {
     enum class Kind { none, moduleKey, settingKey };
     Kind  kind = Kind::none;
@@ -50,8 +48,7 @@ struct CaptureTarget {
 };
 CaptureTarget gCapture;
 
-// 字符串设置编辑用的暂存缓冲。ImGui 的 InputText 需要可写的 char*,
-// 而我们的 StringSetting 内部是 std::string, 所以过一道缓冲。
+// 字符串设置编辑用的暂存缓冲: ImGui 的 InputText 需要可写的 char*。
 // 用设置指针做键, 避免多个字符串设置互相串值。
 struct StringEdit {
     StringSetting* setting = nullptr;
@@ -75,8 +72,6 @@ StringEdit& stringEditFor(StringSetting& s) {
 }
 
 // --------------------------------------------------------------- 各类型控件
-// 每个控件返回"用户是否改了值"。改了就顺手标脏, 让 ConfigManager 的增量保存
-// 能带走这次改动。
 void drawBool(BoolSetting& s) {
     bool v = s.value();
     if (ImGui::Checkbox(s.name().c_str(), &v)) {
@@ -103,7 +98,7 @@ void drawDouble(DoubleSetting& s) {
     float v = static_cast<float>(s.value());
     const float lo = static_cast<float>(s.minValue());
     const float hi = static_cast<float>(s.maxValue());
-    // 步长交给 ImGui 从类型精度推导; 自己在 label 里带上倍率提示更有用。
+    // 步长交给 ImGui 从类型精度推导。
     if (ImGui::SliderFloat(s.name().c_str(), &v, lo, hi, "%.2f")) {
         s.setValue(static_cast<double>(v));
     }
@@ -118,7 +113,7 @@ void drawString(StringSetting& s) {
     if (ImGui::InputText(s.name().c_str(), e.buf, sizeof(e.buf))) {
         e.active = true;
     }
-    // 只在失去焦点时提交: 每敲一个字符都写设置会让 onChanged 高频触发。
+    // 只在失去焦点时提交, 免得每敲一个字符都触发 onChanged。
     if (e.active && ImGui::IsItemDeactivatedAfterEdit()) {
         s.setValue(e.buf);
         e.active = false;
@@ -146,7 +141,7 @@ void drawKeybind(KeybindSetting& s) {
     }
     if (capturing) ImGui::PopStyleColor();
 
-    // 右键清空绑定 —— 不上这个的话, 想把键位改回"未绑定"就只能改配置文件。
+    // 右键清空绑定, 否则想把键位改回"未绑定"就只能改配置文件。
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
         s.clear();
         if (capturing) gCapture.clear();
@@ -156,7 +151,7 @@ void drawKeybind(KeybindSetting& s) {
     }
 }
 
-// 模块自身热键那一行。直接操作 Module, 不经过临时 Setting 对象。
+// 模块自身热键那一行。
 void drawModuleKeybind(Module& m) {
     const bool capturing = gCapture.is(&m);
     const std::string label = capturing
@@ -199,9 +194,8 @@ void drawEnum(EnumSetting& s) {
     int idx = s.choiceIndex();
     if (idx < 0) idx = 0;
     if (ImGui::Combo(s.name().c_str(), &idx, items.c_str())) {
-        // Combo 只会给出 0..choices.size()-1 范围里的下标, 所以这里必然成功。
-        // 显式 (void) 掉返回值而不是忽略警告 —— 将来若候选表与下标来源改动,
-        // 这行会提醒得去看一眼 setChoiceByIndex 的契约。
+        // Combo 只会给出合法下标, 这里必然成功。显式 (void) 掉返回值, 将来
+        // 若候选表或下标来源改动, 这行会提醒去看 setChoiceByIndex 的契约。
         (void)s.setChoiceByIndex(idx);
     }
     if (!s.description().empty() && ImGui::IsItemHovered()) {
@@ -209,10 +203,9 @@ void drawEnum(EnumSetting& s) {
     }
 }
 
-// 按实际类型分派。用 typeName() 而不是 dynamic_cast 链 —— 前者是虚函数,
-// 加第三方设置类型时不用改这里的分派逻辑。
+// 按 typeName() 分派而不是 dynamic_cast 链: 加第三方设置类型时不用改这里。
 void drawSetting(Setting& s) {
-    // 依赖不满足的设置置灰, 但仍然显示: 隐藏掉会让用户以为设置丢了。
+    // 依赖不满足的设置置灰但仍然显示 —— 隐藏掉会让用户以为设置丢了。
     if (!s.isAvailable()) {
         ImGui::BeginDisabled();
         ImGui::TextDisabled("%s (unavailable)", s.name().c_str());
@@ -248,7 +241,7 @@ void drawModule(Module& m) {
         }
         const std::string info = m.info();
         if (!info.empty()) {
-            // 这行是运行期真实读数 —— 用来一眼判断模块到底有没有生效。
+            // 运行期真实读数 —— 用来一眼判断模块到底有没有生效。
             ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s", info.c_str());
         }
 
@@ -290,7 +283,6 @@ bool FeaturePanel::captureKey(int32_t vk, bool pressed) {
     if (!gCapture.active()) return false;
     // 只处理按下; 抬起事件直接吞掉, 免得漏到游戏里。
     if (!pressed) return true;
-
     if (vk == VK_ESCAPE) {
         gCapture.clear();          // Esc = 取消改键
         return true;
@@ -298,8 +290,7 @@ bool FeaturePanel::captureKey(int32_t vk, bool pressed) {
     if (vk <= 0) return true;
 
     if (gCapture.kind == CaptureTarget::Kind::moduleKey) {
-        // 模块可能已经消失(理论上不会, ModuleManager 持有全部所有权),
-        // 仍然做一次判空, 免得 UI 与注册表状态不一致时崩在面板里。
+        // 理论上模块不会消失(所有权在 ModuleManager), 仍然判空免得面板崩掉。
         if (gCapture.module) gCapture.module->setKeyBind(vk);
     } else if (gCapture.kind == CaptureTarget::Kind::settingKey) {
         if (gCapture.setting) gCapture.setting->setValue(vk);
@@ -318,13 +309,17 @@ void FeaturePanel::draw() {
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "player: %s",
                            t.pawnClass.c_str());
         ImGui::Text("movement: %s", t.movementClassName.c_str());
-        // 偏移来源: "反射" 说明运行时反射可用; "静态表(...)" 说明这个构建的
-        // UStruct 布局解不出来, 走的是从二进制属性表读出的已知偏移。
+        // "反射" 说明运行时反射可用; "静态表(...)" 说明走的是从二进制属性表
+        // 读出的已知偏移。
         const std::string& src = ctx.movement->offsetSource();
         ImGui::Text("offsets : %s", src.empty() ? "?" : src.c_str());
         ImGui::Text("  JumpZ=+%#x  MaxWalk=+%#x",
-                    static_cast<unsigned>(ctx.movement->offsets().jumpZVelocity),
-                    static_cast<unsigned>(ctx.movement->offsets().maxWalkSpeed));
+                    static_cast<unsigned>(
+                        ctx.movement->layout().offsetOf(
+                            epsilon::game::dungeons2::MovementField::jumpZVelocity)),
+                    static_cast<unsigned>(
+                        ctx.movement->layout().offsetOf(
+                            epsilon::game::dungeons2::MovementField::maxWalkSpeed)));
     } else {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "player: not resolved");
         const std::string err = ctx.movement ? ctx.movement->lastError() : std::string("no engine");
@@ -382,8 +377,8 @@ void FeaturePanel::draw() {
         }
     }
 
-    // 面板上改过的值可能还没落盘。这里不主动写 —— 由 Runtime 周期调用
-    // saveIfDirty(), 避免拖滑块时每帧都写磁盘。
+    // 面板上改过的值可能还没落盘。由 Runtime 周期调用 saveIfDirty(), 面板不
+    // 主动写 —— 避免拖滑块时每帧都写磁盘。
     if (mgr.anyDirty()) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "(unsaved changes)");

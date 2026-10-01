@@ -20,8 +20,7 @@
 namespace epsilon::feature {
 namespace fs = std::filesystem;
 
-// 日志辅助在 epsilon::payload 里(见 Payload.h)。只引这三个, 不用
-// using namespace —— 见 ModuleManager.cpp 的说明。
+// 日志辅助在 epsilon::payload 里(见 Payload.h)。只引这三个, 不用 using namespace。
 using epsilon::payload::logInfo;
 using epsilon::payload::logWarn;
 using epsilon::payload::logError;
@@ -41,9 +40,6 @@ constexpr wchar_t modulesFolderName[]    = L"modules";
 constexpr wchar_t jsonExtension[]        = L".json";
 
 // 取用户目录。优先 USERPROFILE, 失败退到 SHGetKnownFolderPath。
-//
-// 为什么不用 SHGetFolderPath(旧名): 它要求调用进程已初始化 COM, 且在新
-// Windows 上是废弃接口。SHGetKnownFolderPath 不要求 COM 初始化。
 fs::path userHomeDir() {
     wchar_t buf[MAX_PATH]{};
     const DWORD n = ::GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
@@ -60,10 +56,7 @@ fs::path userHomeDir() {
 }
 
 // 原子写文件: 先写 <path>.tmp, 再 MoveFileEx 覆盖目标。
-//
-// 为什么不能直接 ifstream 覆盖写: 游戏/注入体随时可能被强杀。写到一半被杀
-// 会留下半截 json, 下次启动直接解析失败, 用户的整份配置就没了。改名在同一
-// 卷上是原子的, 保证目标文件要么是旧内容要么是新内容。
+// 直接覆盖写会在进程被强杀时留下半截 json, 用户的整份配置就没了。
 bool writeFileAtomic(fs::path const& path, std::string const& content, std::string& error) {
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);
@@ -76,8 +69,7 @@ bool writeFileAtomic(fs::path const& path, std::string const& content, std::stri
     tmp += L".tmp";
 
     {
-        // 以二进制写: json 里的 \n 不该被 CRT 翻译成 \r\n, 否则文件在不同
-        // 工具间对比会一直显示有差异。
+        // 二进制写: json 里的 \n 不该被 CRT 翻译成 \r\n。
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out) {
             error = "无法打开临时文件";
@@ -95,7 +87,7 @@ bool writeFileAtomic(fs::path const& path, std::string const& content, std::stri
     }
 
     // MoveFileExW 而不是 fs::rename: 后者在目标已存在时的行为随实现而变,
-    // 且不会替换只读文件。MOVEFILE_REPLACE_EXISTING 语义明确。
+    // 且不替换只读文件。
     if (!::MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         const DWORD err = ::GetLastError();
         error = fmt("替换目标文件失败 Win32={}", err);
@@ -118,8 +110,8 @@ bool readFileAll(fs::path const& path, std::string& out, std::string& error) {
     return true;
 }
 
-// 目录名 -> 是否可用作配置名。直接委托给公开校验, 保证"新建时能通过"与
-// "列表里认得出"用的是同一套规则 —— 否则会出现列表能看到却切换不了的目录。
+// 目录名 -> 是否可用作配置名。委托给公开校验, 保证"新建时能通过"与
+// "列表里认得出"用的是同一套规则。
 bool isUsableConfigName(std::string const& name) {
     return ConfigManager::isValidConfigName(name);
 }
@@ -149,8 +141,7 @@ fs::path ConfigManager::configDirLocked() const {
     // 2) 默认: <用户目录>\.epsilon\ext\dungeons2
     const fs::path home = userHomeDir();
     if (home.empty()) {
-        // 拿不到用户目录时退到进程当前目录 —— 总比完全不落盘好, 且日志里
-        // 会体现出来(路径不对时一眼可见)。
+        // 拿不到用户目录时退到进程当前目录 —— 总比完全不落盘好。
         return fs::current_path() / L"epsilon-config";
     }
     return home / relativeConfigPath;
@@ -195,7 +186,7 @@ bool ConfigManager::isValidConfigName(std::string_view name) {
     if (name.empty() || name.size() > 64) return false;
     if (name == "." || name == "..") return false;
 
-    // 配置名会直接当目录名用, 所以必须白名单式校验 —— 这里漏一个字符就等于
+    // ★ 配置名会直接当目录名用, 所以必须白名单式校验 —— 漏一个字符就等于
     // 让配置名能写到配置根之外(路径穿越)。
     bool hasNonDot = false;
     for (char c : name) {
@@ -213,10 +204,8 @@ bool ConfigManager::isValidConfigName(std::string_view name) {
     }
     // 至少得有非点字符, 否则 "." / "..." 这类名字会落到当前目录或上两级。
     if (!hasNonDot) return false;
-    // 连续点统一拒绝。单点已单独挡掉, 所以出现 ".." 一定是可疑输入。
     if (name.find("..") != std::string_view::npos) return false;
-    // 结尾不能是点或空格 —— Win32 会静默裁掉, 导致实际目录名与期望不符,
-    // 之后按名字就找不回来了。
+    // 结尾不能是点或空格 —— Win32 会静默裁掉, 之后按名字就找不回来了。
     if (name.back() == '.' || name.back() == ' ') return false;
     return true;
 }
@@ -255,7 +244,7 @@ std::optional<std::string> ConfigManager::readActiveConfigNameLocked() const {
     std::string err;
     if (!readFileAll(file, content, err)) return std::nullopt;
 
-    // 去掉首尾空白与 BOM。用文本编辑器改过这个文件的话很容易带上这些,
+    // 去掉首尾空白与 BOM —— 用文本编辑器改过这个文件的话很容易带上这些,
     // 不清掉会导致按名字找目录失败。
     if (content.size() >= 3 &&
         static_cast<unsigned char>(content[0]) == 0xEF &&
@@ -295,7 +284,7 @@ bool ConfigManager::initializeLocked() {
     if (auto stored = readActiveConfigNameLocked()) {
         activeConfig_ = *stored;
     } else {
-        // 没有 active-config.txt 时: 若已有配置目录就取第一个, 否则用默认名。
+        // 没有 active-config.txt 时: 已有配置目录就取第一个, 否则用默认名。
         activeConfig_.clear();
         std::error_code ec;
         const fs::path cfgRoot = configDirLocked() / configsFolderName;
@@ -341,14 +330,14 @@ void ConfigManager::loadActiveLocked() {
     const fs::path dir = modulesDirFor(activeConfig_);
     std::error_code ec;
 
-    // 先把所有模块复位到默认值。否则"配置里删掉了某个模块的条目"时, 内存里
-    // 会残留上一次加载的值 —— 那种不一致极难复现也极难查。
+    // 先把所有模块复位到默认值, 否则"配置里删掉了某个模块的条目"时内存里会
+    // 残留上一次加载的值。
     for (auto* m : mgr.modules()) {
         if (m) m->reset();
     }
 
     if (!fs::exists(dir, ec)) {
-        // 配置首次创建时目录就是空的, 走默认值即可, 不算错误。
+        // 配置首次创建时目录就是空的, 走默认值即可。
         mgr.markAllClean();
         return;
     }
@@ -369,8 +358,8 @@ void ConfigManager::loadActiveLocked() {
             continue;
         }
 
-        // 用不抛异常的解析入口。配置可能被手改坏, 这时应当跳过这一个模块
-        // 而不是让整次加载中断。
+        // 不抛异常的解析入口: 配置可能被手改坏, 这时应跳过这一个模块而不是
+        // 让整次加载中断。
         nlohmann::json parsed = nlohmann::json::parse(content, nullptr, false);
         if (parsed.is_discarded()) {
             logWarn(fmt("模块配置解析失败(已跳过) [{}]", moduleName));
@@ -385,7 +374,7 @@ void ConfigManager::loadActiveLocked() {
         }
     }
 
-    // 清掉所有脏标记: 刚加载进来的值就是磁盘上的值, 不该被当成"待保存的改动"。
+    // 刚加载进来的值就是磁盘上的值, 不该被当成"待保存的改动"。
     mgr.markAllClean();
     logInfo(fmt("已加载 {} 个模块配置(配置: {})", loaded, activeConfig_));
 }
@@ -432,8 +421,7 @@ bool ConfigManager::saveLocked() {
             continue;
         }
 
-        // dump 用 4 空格缩进 + 不转义非 ASCII: 配置是给人看的, 中文模块名
-        // 直接可读比 \uXXXX 友好得多。
+        // 4 空格缩进 + 不转义非 ASCII: 配置是给人看的。
         const std::string text = doc.dump(4, ' ', false, nlohmann::json::error_handler_t::replace);
 
         std::string err;
@@ -445,7 +433,7 @@ bool ConfigManager::saveLocked() {
     }
 
     if (allOk) {
-        // 只有全部写成功才清脏标记 —— 否则写失败的那部分改动会永久丢失。
+        // 只有全部写成功才清脏标记, 否则写失败的那部分改动会永久丢失。
         mgr.markAllClean();
     }
     return allOk;
@@ -475,7 +463,7 @@ std::vector<std::string> ConfigManager::listConfigsLocked() const {
         const std::string name = toUtf8(entry.path().filename().wstring());
         if (isUsableConfigName(name)) out.push_back(name);
     }
-    // 排序保证 UI 里顺序稳定 —— 目录遍历顺序在不同文件系统上不一样。
+    // 排序保证面板里顺序稳定 —— 目录遍历顺序在不同文件系统上不一样。
     std::sort(out.begin(), out.end());
     return out;
 }
@@ -541,8 +529,8 @@ bool ConfigManager::deleteConfig(std::string_view name) {
 
     const std::string target(name);
     if (target == activeConfig_) {
-        // 允许删除当前配置会让 active-config.txt 立刻指向不存在的目录,
-        // 下次启动就得靠 fallback 逻辑猜 —— 直接拒绝更清楚。
+        // 删当前配置会让 active-config.txt 指向不存在的目录, 下次启动得靠
+        // fallback 逻辑猜 —— 直接拒绝。
         setLastErrorLocked("不能删除当前生效的配置, 请先切换到别的配置");
         return false;
     }

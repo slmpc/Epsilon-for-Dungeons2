@@ -1,14 +1,5 @@
-// ============================================================================
-//  main.cpp — 注入器主流程
-//
-//  整体节奏:
-//    1. 解析参数 / 列表模式直接退出
-//    2. 选目标进程
-//    3. 起管道服务端, 并把管道名写进目标环境块(注入体在 DllMain 后读它)
-//    4. CreateRemoteThread(LoadLibraryW) 注入
-//    5. 等注入体报 ready
-//    6. 下发命令 / 进入交互
-// ============================================================================
+// Main.cpp — 注入器主流程: 选目标 → 起管道 → 注入 → 等 ready → 下发命令。
+// 排查见 docs/dev/diagnostics.md。
 #include "common/PipeChannel.h"
 #include "common/ProcUtil.h"
 #include "common/Text.h"
@@ -26,7 +17,6 @@
 namespace epsilon {
 namespace {
 
-// 找同目录下的注入体 DLL。
 std::string defaultPayloadPath() {
     wchar_t buf[MAX_PATH * 4]{};
     const DWORD n = ::GetModuleFileNameW(nullptr, buf, static_cast<DWORD>(std::size(buf)));
@@ -43,9 +33,7 @@ std::string defaultPayloadPath() {
     return s;
 }
 
-// 注入体把日志写在 %TEMP%\epsilonPayload_<pid>.log。
-// 注入体在目标进程里没有控制台, 排查问题时这份日志是唯一线索, 所以
-// 任何等待失败都把它指出来。
+// 注入体的文件日志路径(它在目标进程里没有控制台, 等待失败时要把它指出来)。
 std::string payloadLogPath(uint32_t pid) {
     wchar_t tmp[MAX_PATH]{};
     const DWORD n = ::GetTempPathW(static_cast<DWORD>(std::size(tmp)), tmp);
@@ -53,8 +41,6 @@ std::string payloadLogPath(uint32_t pid) {
     return fmt("{}epsilonPayload_{}.log", dir, pid);
 }
 
-// 注入器是控制台程序, Ctrl+C 会让它直接死掉, 留下一堆没清理的句柄。
-// 交给系统回收即可 —— 但要在退出前把 bye 发给注入体, 所以装一个简单的处理器。
 volatile BOOL gInterrupted = FALSE;
 
 BOOL WINAPI ctrlHandler(DWORD type) {
@@ -81,8 +67,7 @@ int main(int argc, char** argv) {
     setColorEnabled(!opt->noColor);
     ::SetConsoleCtrlHandler(&ctrlHandler, TRUE);
 
-    // --log: 让程序自己写文件。提权运行时这是唯一可靠的取回输出的方式 ——
-    // 提权启动的 shell 重定向在 UAC 之后常常静默失效。
+    // 提权启动的 shell 重定向在 UAC 之后常常静默失效, 所以让程序自己写文件。
     if (!opt->logPath.empty()) {
         if (logOpen(opt->logPath)) {
             outLine(fmt("  [*] 输出镜像到: {}", opt->logPath));
@@ -93,41 +78,34 @@ int main(int argc, char** argv) {
 
     uiBanner();
 
-    // ---------------------------------------------------------------- 列表模式
     if (opt->listOnly) {
         cmdList(opt->filter, opt->verbose);
         return 0;
     }
 
-    // ---------------------------------------------------------------- 选目标
     auto target = pickTarget(*opt);
     if (!target) return 3;
 
     outLine(fmt("  目标进程   : {} (PID {})", target->name, target->pid));
     outLine(fmt("  映像路径   : {}", target->path.empty() ? "(未知)" : target->path));
 
-    // 目标模块基址 —— 记录基线, 注入后好做差异对比
     const auto modBefore = findModule(target->pid, opt->targetName);
     if (modBefore) {
         outLine(fmt("  模块基址   : {} ({} 字节)", hex(modBefore->base, 16),
                      humanBytes(modBefore->size)));
     }
 
-    // 解析 DLL 路径
     std::string dll = opt->dll.empty() ? defaultPayloadPath() : opt->dll;
     if (dll.size() >= 2 && dll[1] != ':') {
-        // 相对路径补成绝对路径 —— 目标进程用不了相对路径
+        // 目标进程用不了相对路径, 补成绝对路径。
         char full[MAX_PATH * 4]{};
         if (::GetFullPathNameA(dll.c_str(), static_cast<DWORD>(std::size(full)), full, nullptr)) {
             dll = full;
         }
     }
 
-    // ---------------------------------------------------------------- 管道
-    // 约定名: 由目标 PID + 被注入 DLL 的文件名推导。注入体用同样的两样东西
-    // 算出同一名字, 无需传参。槽位带上 DLL 名, 于是不同文件名的注入体可以
-    // 并存于同一进程 —— 改完代码换个名字就能注入, 不必重启游戏。
-    // 注入器**只做注入**, 不做卸载 —— 见 procUtil.h 里的说明。
+    // 约定名: 由目标 PID + 被注入 DLL 的文件名推导, 注入体用同样两样东西算出同一名字。
+    // 槽位带上 DLL 名, 所以不同文件名的注入体可在同一进程并存 —— 换名即可注入, 不必重启游戏。
     InjectorChannel channel;
     {
         std::string err;
@@ -141,7 +119,6 @@ int main(int argc, char** argv) {
         }
     }
 
-    // ---------------------------------------------------------------- 注入
     outLine("");
     outColored(ansi::bold, "  正在注入 (CreateRemoteThread + LoadLibraryW)...\n");
     outLine(fmt("  DLL        : {}", dll));
@@ -163,7 +140,6 @@ int main(int argc, char** argv) {
     outColored(ansi::green, fmt("  [+] 注入成功 ({} ms)\n", r.elapsedMs));
     outLine(fmt("      远端 HMODULE : {}", hex(r.remoteModule, 16)));
 
-    // 差异: 注入后再看模块列表, 确认 DLL 真的进去了
     if (auto modAfter = findModule(target->pid, "epsilonPayload.dll")) {
         outColored(ansi::green, fmt("  [+] 模块已加载 : {} ({} 字节)\n",
                                     hex(modAfter->base, 16), humanBytes(modAfter->size)));
@@ -171,7 +147,6 @@ int main(int argc, char** argv) {
         outLine("      (Toolhelp 里暂未看到模块快照, 通常稍等即出现)");
     }
 
-    // ---------------------------------------------------------------- 等就绪
     outLine("");
     outLine("  等待注入体初始化 (连管道 / 定位 GObjects+GNames / 重建属性偏移)...");
     if (channel.waitReady(opt->waitReadyMs)) {
@@ -182,7 +157,6 @@ int main(int argc, char** argv) {
         outLine("      若目标进程已消失, 日志最后一行就是崩溃点。");
     }
 
-    // ---------------------------------------------------------------- 命令
     int rc = 0;
     if (!opt->commands.empty()) {
         outLine("");
@@ -197,8 +171,7 @@ int main(int argc, char** argv) {
                 rc = 7;
                 break;
             }
-            // 给注入体一点时间把响应写完。命令是同步执行的, 但没有完成通知,
-            // 所以这里用固定小延迟 —— 采集类命令都很快。
+            // 命令是同步执行的但没有完成通知, 用固定小延迟等响应写完。
             ::Sleep(400);
         }
     }

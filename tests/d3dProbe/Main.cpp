@@ -1,13 +1,6 @@
-// ============================================================================
-//  d3d_probe — 最小复现：在普通进程里做一遍 payload 里那套"临时交换链取
-//  Present 地址"的流程，逐步打印，看它到底在哪一步炸。
-//
-//  为什么要这个: 在测试靶子里，payload 走到 D3D11CreateDeviceAndSwapChain
-//  就没下文了(目标进程直接死)。需要在**不受注入影响**的普通进程里复现同一段
-//  代码，才能区分两种情况:
-//    * 普通进程里也炸  → 是这段代码/驱动环境的问题
-//    * 普通进程里正常  → 是注入上下文的问题(线程/窗口站/初始化时机)
-// ============================================================================
+// d3dProbe/Main.cpp — 最小复现: 在普通进程里跑一遍"临时交换链取 Present 地址"。
+// 在不受注入影响的进程里复现同一段代码, 用来区分「这段代码/驱动环境的问题」与
+// 「注入上下文(线程/窗口站/初始化时机)的问题」; 逐步打印, 定位崩在哪一步。
 #include <windows.h>
 #include <dxgi.h>
 #include <d3d11.h>
@@ -46,7 +39,6 @@ int main() {
     step("CreateDXGIFactory1 = %p", (void*)createFactory);
     if (!createFactory) return 1;
 
-    // IDXGIFactory1 {770AAE78-F26F-4DBA-A829-253C83D1B387}
     const IID iid = {0x770AAE78, 0xF26F, 0x4DBA, {0xA8, 0x29, 0x25, 0x3C, 0x83, 0xD1, 0xB3, 0x87}};
     void* factory = nullptr;
     const HRESULT fhr = createFactory(iid, &factory);

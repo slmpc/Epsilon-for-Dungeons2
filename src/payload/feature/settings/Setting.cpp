@@ -13,15 +13,11 @@ namespace {
 
 // ---------------------------------------------------------------- 取值辅助
 //
-// 这几个函数收的是 "设置的值本身"(不是包着它的对象), 所以签名不带 key。
-//
-// 为什么全用这套带 fallback 的取法而不是 in.get<T>() 直接转换: 配置文件是
-// 用户可手改的明文, 里面出现 "速度": "快" 这种类型不符的值是常态。直接转换
-// 会抛异常, 而异常从注入体的配置加载路径里穿出去会把游戏带崩。这里的策略是
-// "单条值退化到默认值, 其余照常加载", 坏值不会连累整份配置。
+// 契约: 一律"坏值退化为 fallback, 不抛异常"。配置文件是用户可手改的明文,
+// 类型不符是常态, 而异常从注入体的配置加载路径穿出去会把游戏带崩。
+// 收的是"设置的值本身"(不是包着它的对象), 所以签名不带 key。
 
-// 数值的特殊处理: 允许 "3000" 这种被引号包起来的数字。
-// 手写配置时很常见, 为此报错属于不必要的严苛。
+// 允许 "3000" 这种被引号包起来的数字 —— 手写配置里很常见。
 double asNumberOr(nlohmann::json const& in, double fallback) {
     if (in.is_number()) {
         try { return in.get<double>(); } catch (...) { return fallback; }
@@ -53,7 +49,7 @@ std::string asStringOr(nlohmann::json const& in, std::string_view fallback) {
     return std::string(fallback);
 }
 
-// 去掉末尾的 ".000000" 之类零头, 让 double 在 UI 上显示得干净些。
+// 去掉末尾的 ".000000" 之类零头, 让 double 在面板上显示得干净些。
 std::string trimNumber(double v) {
     std::string s = std::format("{}", v);
     if (s.find('.') != std::string::npos && s.find('e') == std::string::npos &&
@@ -95,7 +91,7 @@ BoolSetting::BoolSetting(std::string_view name, bool defaultValue, std::string_v
     : Setting(name, description), value_(defaultValue), defaultValue_(defaultValue) {}
 
 void BoolSetting::setValue(bool v) {
-    if (value_ == v) return;      // 值没变就不触发回调, 避免 UI 高频写入刷爆 hook
+    if (value_ == v) return;      // 值没变不触发回调, 避免 UI 高频写入刷爆 hook
     value_ = v;
     notifyChanged();
 }
@@ -139,8 +135,7 @@ std::string IntSetting::displayValue() const { return std::to_string(value_); }
 void IntSetting::writeTo(nlohmann::json& out) const { out = value_; }
 
 void IntSetting::readFrom(nlohmann::json const& in) {
-    // 先取数值再夹取。用 unbounded 写入是为了不在这里触发回调 ——
-    // 加载配置不该产生副作用。
+    // 用 unbounded 写入是为了不在这里触发回调 —— 加载配置不该产生副作用。
     const double raw = asNumberOr(in, static_cast<double>(value_));
     // double 转 int64 前必须判范围, 否则是实现定义行为。
     if (raw > 9.2e18 || raw < -9.2e18) return;
@@ -238,12 +233,11 @@ void KeybindSetting::readFrom(nlohmann::json const& in) {
 }
 
 std::string KeybindSetting::keyName(int32_t vk) {
-    // ⚠️ 返回值会直接画在游戏内的 ImGui 面板上, 所以必须保持纯 ASCII ——
-    // 内置位图字体没有中文字形, 中文会渲染成 '?'(实测踩过)。
+    // ★ 返回值会直接画在游戏内的 ImGui 面板上, 必须保持纯 ASCII 英文 ——
+    // 内置位图字体没有中文字形, 中文会渲染成 '?'。
     if (vk < 0) return "unbound";
 
-    // 常见键给可读名。完整的 VK 表有 200 多项, 全列出来收益很低 ——
-    // 未覆盖的落到最后的十六进制兜底, 仍然可用于人工对表。
+    // 常见键给可读名, 未覆盖的落到最后的十六进制兜底。
     switch (vk) {
         case 0x08: return "Backspace";
         case 0x09: return "Tab";
@@ -299,7 +293,7 @@ EnumSetting::EnumSetting(std::string_view name,
 }
 
 std::string const& EnumSetting::value() const {
-    // ASCII: 见 keyName 的说明 —— 这个值会显示在面板上。
+    // ★ 这个值会显示在面板上, 必须是纯 ASCII。
     static const std::string unknown{"<invalid>"};
     if (index_ < 0 || static_cast<size_t>(index_) >= choices_.size()) return unknown;
     return choices_[static_cast<size_t>(index_)];
@@ -309,8 +303,7 @@ bool EnumSetting::is(std::string_view choice) const { return value() == choice; 
 
 void EnumSetting::setValue(std::string_view choice) {
     if (setChoiceByName(choice)) return;
-    // 未匹配到候选值时保持原样 —— 静默拒绝比抛异常合适, 调用方多半是在
-    // 响应 UI 输入, 不应该因为打错字就崩。
+    // 未匹配到候选值时保持原样 —— 静默拒绝比抛异常合适, 调用方多半是在响应面板输入。
 }
 
 void EnumSetting::setIndex(int index) {
@@ -333,8 +326,8 @@ bool EnumSetting::setChoiceByIndex(int index) {
 }
 
 bool EnumSetting::setChoiceByName(std::string_view name) {
-    // 大小写不敏感匹配, 并额外接受候选名的规范化形式(去空格/连字符/下划线),
-    // 这样配置文件里写 "hold"、"Hold"、"HOLD" 都能落到同一个候选值。
+    // 大小写不敏感, 并接受候选名的规范化形式(去空格/连字符/下划线/制表符),
+    // 这样配置里写 "hold" / "Hold" / "HOLD" 都能落到同一个候选值。
     auto normalize = [](std::string_view s) {
         std::string out;
         out.reserve(s.size());
@@ -357,10 +350,9 @@ bool EnumSetting::setChoiceByName(std::string_view name) {
 void EnumSetting::writeTo(nlohmann::json& out) const { out = value(); }
 
 void EnumSetting::readFrom(nlohmann::json const& in) {
-    // 落盘的是候选名而不是下标 —— 下标会随候选表增删而错位, 名字不会。
-    // 这样加一个候选值不会把已有配置读串。
+    // 落盘的是候选名而不是下标: 下标会随候选表增删而错位, 名字不会。
     const std::string raw = asStringOr(in, value());
-    // 静默: 配置加载路径不应触发回调。
+    // 静默写入: 配置加载路径不应触发回调。
     if (setChoiceByName(raw)) setIndexSilent(index_);
     // 名字不在候选表里(多半是旧版本配置)就保持当前值, 不报错。
 }

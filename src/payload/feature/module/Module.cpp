@@ -10,8 +10,7 @@
 namespace epsilon::feature {
 namespace {
 
-// 分类名表。顺序必须与 Category 枚举一致 —— 用 static_assert 在编译期钉住,
-// 免得将来有人往枚举中间插一个值却忘了改表。
+// 分类名表。顺序必须与 Category 枚举一致。
 constexpr std::string_view categoryNames[] = {
     "combat",     // Category::combat
     "player",     // Category::player
@@ -20,16 +19,12 @@ constexpr std::string_view categoryNames[] = {
 };
 constexpr size_t categoryCount = std::size(categoryNames);
 
-// 键位/绑定模式的字符串化。
 std::string_view bindModeNameOf(Module::BindMode mode) noexcept {
     return mode == Module::BindMode::hold ? "Hold" : "Toggle";
 }
 
 } // namespace
 
-// ===========================================================================
-//  Category
-// ===========================================================================
 std::string_view categoryName(Category c) noexcept {
     const auto i = static_cast<size_t>(c);
     if (i >= categoryCount) return "unknown";
@@ -37,7 +32,6 @@ std::string_view categoryName(Category c) noexcept {
 }
 
 std::optional<Category> categoryFromName(std::string_view name) {
-    // 大小写不敏感 + 忽略分隔符, 让 "Player" / "player" / "PLAYER" 都能认。
     auto normalize = [](std::string_view s) {
         std::string out;
         out.reserve(s.size());
@@ -61,9 +55,6 @@ std::vector<Category> allCategories() {
     return out;
 }
 
-// ===========================================================================
-//  Module
-// ===========================================================================
 Module::Module(std::string_view name, Category category, std::string_view description)
     : name_(name), description_(description), category_(category) {}
 
@@ -73,8 +64,7 @@ void Module::setEnabled(bool enabled) {
     enabled_ = enabled;
     dirty_ = true;
 
-    // 先改状态再回调 —— 回调里读 isEnabled() 必须已经看到新状态,
-    // 否则 onEnable 里做判断会拿到旧值。
+    // 先改状态再回调 —— 回调里读 isEnabled() 必须已经看到新状态。
     if (enabled_) {
         onEnable();
     } else {
@@ -89,8 +79,7 @@ void Module::setKeyBind(int32_t vk) noexcept {
 }
 
 void Module::setDefaultKeyBind(int32_t vk) noexcept {
-    // 默认键位同时是当前键位 —— 子类在构造期调用它来声明"出厂键位",
-    // 此时还没有用户配置覆盖, 两者理应一致。
+    // 默认键位同时是当前键位: 构造期还没有用户配置覆盖, 两者理应一致。
     defaultKeyBind_ = vk;
     keyBind_ = vk;
 }
@@ -131,10 +120,8 @@ void Module::setHidden(bool v) noexcept {
     dirty_ = true;
 }
 
-// ---------------------------------------------------------------- 设置
+// 设置变更时把它标脏。所有 add* 都会挂上这个回调。
 void Module::hookSettingDirty(Setting& s) {
-    // 链式保留原有的 onChanged(如果有), 否则模块的脏标记会覆盖掉用户回调。
-    // 目前 add* 都是新建对象, 这里主要为了将来支持"接手已有设置"时不丢回调。
     s.setOnChanged([this] { markDirty(); });
 }
 
@@ -218,12 +205,10 @@ Setting* Module::findSetting(std::string_view name) const {
 
 // ---------------------------------------------------------------- 复位
 void Module::reset() {
-    // 先关掉。用 setEnabled 而不是直接写 enabled_, 是为了让 onDisable 有机会
-    // 撤销模块做过的事(还原钩子/恢复内存改写等)。
+    // 走 setEnabled(false) 而不是直接写 enabled_, 让 onDisable 有机会撤销
+    // 模块做过的事(还原钩子/恢复内存改写等)。
     setEnabled(false);
-    // 键位回默认而不是清空: 键位属于"设置", 出厂就该有值。早先这里写成
-    // unbound, 结果任何在构造期绑好的热键都会在配置加载时被抹掉 ——
-    // 模块永远不可能自带默认热键。
+    // 键位回默认而不是清空: 键位属于"设置", 出厂就该有值。
     keyBind_ = defaultKeyBind_;
     bindMode_ = BindMode::toggle;
     hidden_ = defaultHidden_;
@@ -288,8 +273,7 @@ void Module::fromJson(nlohmann::json const& in) {
     }
 
     // ---- 设置值 ----
-    // 遍历的是**代码里的设置表**而不是 json 的键。这样配置文件里多余的键会被
-    // 自然忽略(旧版本留下的键不会报错), 缺的键则保持默认值。
+    // 遍历的是**代码里的设置表**而不是 json 的键: 多余的键被忽略, 缺的键保持默认。
     if (auto it = in.find("settings"); it != in.end() && it->is_object()) {
         auto const& settingsObj = *it;
         for (auto const& s : settings_) {
@@ -306,9 +290,8 @@ void Module::fromJson(nlohmann::json const& in) {
     }
 
     // ---- 开关放最后 ----
-    // 必须最后应用: onEnable 里通常会读设置值, 只有设置都就位了再启用,
-    // 模块才会看到正确的配置。这一条是照着 Open-Epsilon 的注释做的, 有实际
-    // 影响 —— 顺序反了会让模块以默认参数启用一次。
+    // ★ 必须最后应用: onEnable 里通常会读设置值, 只有设置都就位了再启用,
+    // 模块才会看到正确的配置。顺序反了会让模块以默认参数启用一次。
     if (auto it = in.find("enabled"); it != in.end() && it->is_boolean()) {
         try { setEnabled(it->get<bool>()); } catch (...) {}
     }

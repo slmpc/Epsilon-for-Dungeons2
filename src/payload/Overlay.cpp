@@ -1,18 +1,6 @@
-// ============================================================================
-//  overlay.cpp — D3D12 ImGui 覆盖层实现
-//
-//  每帧的 GPU 侧顺序(必须严格保持, 否则会把画面搞花或挂住):
-//    1. 取当前后缓冲索引 → 取后缓冲资源
-//    2. Reset 该索引的命令分配器 → Reset 命令列表
-//    3. 屏障 PRESENT → RENDER_TARGET
-//    4. 绑定我们自己为该后缓冲建的 RTV
-//    5. 绑定 SRV 堆 → ImGui_ImplDX12_RenderDrawData
-//    6. 屏障 RENDER_TARGET → PRESENT
-//    7. Close → ExecuteCommandLists(我们的队列) → 等围栏
-//
-//  第 7 步的等待很关键: 必须等我们的队列真的画完, 才能把控制权交回给游戏的
-//  Present。否则游戏可能在我们还在写后缓冲时就开始下一帧。
-// ============================================================================
+// Overlay.cpp — D3D12 + ImGui 覆盖层实现
+// ⚠️ 每帧的 GPU 侧命令顺序必须严格保持, 且交换链尺寸检测必须在**取后缓冲之前**。
+// 细节见 docs/payload/overlay.md
 #include "payload/Overlay.h"
 
 #include "common/Text.h"
@@ -21,14 +9,13 @@
 #include "payload/Runtime.h"
 #include "payload/feature/module/ModuleManager.h"
 #include "payload/feature/ui/FeaturePanel.h"
-#include "payload/ue/Engine.h"
+#include "payload/game/ue/Engine.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-// dxgi1_6.h 会把 1_1..1_6 全部拉进来 —— IDXGISwapChain1/2/3、IDXGIFactory2
-// 分别定义在不同层级(1_2 / 1_3 / 1_4), 只 include dxgi.h 不够。
+// dxgi1_6.h 才会带出 IDXGISwapChain1/2/3 与 IDXGIFactory2 —— 只 include dxgi.h 不够。
 #include <dxgi1_6.h>
 #include <d3d12.h>
 
@@ -48,18 +35,16 @@ namespace epsilon::payload::overlay {
 namespace {
 
 constexpr int  kFramesInFlight = 3;
-constexpr int  kSrvHeapSize    = 64;      // ImGui 1.92 是动态纹理, 会按需分配
+constexpr int  kSrvHeapSize    = 64;      // ImGui 1.92 用动态纹理, 按需分配
 constexpr DWORD kToggleKey     = VK_INSERT;
 
-// --------------------------------------------------------------- SRV 分配器
-// ImGui 的后端把"分配纹理描述符"这件事交给宿主, 所以我们要自己管一个小堆。
 struct SrvAllocator {
     ID3D12DescriptorHeap*        heap = nullptr;
     UINT                         inc = 0;
     D3D12_CPU_DESCRIPTOR_HANDLE  cpuBase{};
     D3D12_GPU_DESCRIPTOR_HANDLE  gpuBase{};
     bool                         used[kSrvHeapSize]{};
-    int                          allocCount = 0;   // 诊断: 后端一共要了几个描述符
+    int                          allocCount = 0;
 };
 
 // --------------------------------------------------------------- 全局状态
@@ -93,11 +78,9 @@ struct State {
 State    g;
 std::mutex gMu;
 
-// ImGui 的帧率统计与画面节流用
 float  gUiFps = 0.0f;
 double gLastExpensiveRead = 0.0;
 
-// 对象浏览器的缓存(引擎遍历比较慢, 限频刷新)
 struct ObjRow { std::string cls; std::string name; uint64_t addr; };
 std::vector<ObjRow> gObjCache;
 char                gFilter[128]{};
@@ -139,7 +122,7 @@ void srvFree(ImGui_ImplDX12_InitInfo* info,
     if (i >= 0 && i < kSrvHeapSize) a->used[i] = false;
 }
 
-// 窗口过程: 可见时把输入喂给 ImGui; 切换键始终处理。
+// 窗口过程: 可见时把输入喂给 ImGui; 切换键始终处理; 其余原样转发给游戏。
 LRESULT WINAPI wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
         if (static_cast<DWORD>(wp) == kToggleKey) {
@@ -148,8 +131,7 @@ LRESULT WINAPI wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
     }
 
-    // 改键捕获必须**早于**模块分发与游戏处理: 用户点了"改键"之后按下的那个键,
-    // 只应该被绑定, 不应该同时触发一次模块开关、也不应该漏进游戏。
+    // ⚠️ 改键捕获必须早于模块分发与游戏处理: 那个键只该被绑定。
     // 面板不可见时不拦截, 否则一个隐藏的面板会把按键全部吃掉。
     const bool isKey = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN ||
                         msg == WM_KEYUP   || msg == WM_SYSKEYUP);
@@ -163,8 +145,7 @@ LRESULT WINAPI wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 1;
     }
 
-    // 面板可见且 ImGui 正在接收键盘时, 不再把按键分发给模块 —— 否则在面板里
-    // 拖滑块/输入文本会顺手把模块开关切了。
+    // ImGui 正在接收键盘时不再分发给模块 —— 否则在面板里拖滑块会顺手切了模块开关。
     if (isKey && g.visible && ImGui::GetIO().WantCaptureKeyboard) {
         return ::CallWindowProcW(g.origWndproc, hwnd, msg, wp, lp);
     }
@@ -176,7 +157,6 @@ LRESULT WINAPI wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return ::CallWindowProcW(g.origWndproc, hwnd, msg, wp, lp);
 }
 
-// 等我们的队列把上一批命令执行完。
 bool waitGpu() {
     if (!g.queue || !g.fence) return false;
     const UINT64 v = ++g.fenceValue;
@@ -188,14 +168,12 @@ bool waitGpu() {
 
 // --------------------------------------------------------------- 资源创建
 bool createResources(IDXGISwapChain* sc) {
-    // 游戏自己的设备 —— 我们所有资源都建在它上面, 这样后缓冲才互通
     if (FAILED(sc->GetDevice(__uuidof(ID3D12Device),
                              reinterpret_cast<void**>(&g.device))) || !g.device) {
         g.error = "swapchain->GetDevice(ID3D12Device) 失败";
         return false;
     }
 
-    // 后缓冲格式与数量(决定 RTV 堆大小和 ImGui 的 RTVFormat), 以及尺寸(视口用)
     DXGI_SWAP_CHAIN_DESC desc{};
     if (SUCCEEDED(sc->GetDesc(&desc))) {
         g.rtvFormat = desc.BufferDesc.Format;
@@ -206,7 +184,6 @@ bool createResources(IDXGISwapChain* sc) {
         g.backbufferCount = 2;
     }
     if (g.width == 0 || g.height == 0) {
-        // 有些交换链的 BufferDesc 尺寸是 0(由窗口决定), 那就问窗口
         RECT rc{};
         if (g.hwnd && ::GetClientRect(g.hwnd, &rc)) {
             g.width = static_cast<UINT>(rc.right - rc.left);
@@ -216,18 +193,15 @@ bool createResources(IDXGISwapChain* sc) {
     if (g.width == 0)  g.width = 1920;
     if (g.height == 0) g.height = 1080;
 
-    // 命令队列: 必须用**游戏自己的那条**。
-    //   D3D12 的 flip 模型交换链与创建它的队列绑定。我们自己的队列只能用来
-    //   取 vtable; 在它上面渲染会出现"命令执行了、围栏完成了、画面却没变"
-    //   这种极具误导性的现象。
-    //   队列由 hooks.cpp 里的 ExecuteCommandLists 钩子在 Present 之前捕获。
+    // ⚠️ 必须用**游戏自己的那条队列**(由 ExecuteCommandLists 钩子在 Present 之前
+    //    捕获): flip 模型交换链与创建它的队列绑定, 在别的队列上渲染等于白画。
     g.queue = static_cast<ID3D12CommandQueue*>(presentQueue());
     if (!g.queue) {
         g.error = "还没捕获到游戏的命令队列 —— 无法保证渲染进入呈现结果";
         return false;
     }
 
-    // 命令分配器(每帧一个)
+    // 命令分配器(每帧一个) / 命令列表(先建了再 Close, 后面每帧 Reset) / 围栏
     for (int i = 0; i < kFramesInFlight; ++i) {
         if (FAILED(g.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                                     IID_PPV_ARGS(&g.alloc[i])))) {
@@ -236,7 +210,6 @@ bool createResources(IDXGISwapChain* sc) {
         }
     }
 
-    // 命令列表(先建了再 Close, 后面每帧 Reset)
     if (FAILED(g.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                            g.alloc[0], nullptr,
                                            IID_PPV_ARGS(&g.list)))) {
@@ -283,8 +256,7 @@ bool createResources(IDXGISwapChain* sc) {
     return true;
 }
 
-// 仅为后缓冲建 RTV 描述符。与设备/SRV 堆等"与尺寸无关"的资源分开,
-// 这样交换链重建时只需要跑这一部分。
+// 只为后缓冲建 RTV; 与设备/SRV 堆等"与尺寸无关"的资源分开, 重建时只跑这一部分。
 bool createBackBufferViews(IDXGISwapChain* sc) {
     if (!g.device || !g.rtvHeap) { g.error = "RTV 堆不存在"; return false; }
 
@@ -293,8 +265,8 @@ bool createBackBufferViews(IDXGISwapChain* sc) {
         ID3D12Resource* bb = nullptr;
         if (SUCCEEDED(sc->GetBuffer(i, IID_PPV_ARGS(&bb))) && bb) {
             g.device->CreateRenderTargetView(bb, nullptr, h);
-            // 后缓冲由交换链持有, 这里只是借用 —— 必须立刻 Release,
-            // 否则交换链 ResizeBuffers 会因为引用计数不为 0 而失败。
+            // ⚠️ 后缓冲由交换链持有, 这里只是借用 —— 必须立刻 Release,
+            //    否则交换链 ResizeBuffers 会因引用计数不为 0 而失败。
             bb->Release();
         } else {
             g.error = fmt("GetBuffer({}) 失败", i);
@@ -305,21 +277,19 @@ bool createBackBufferViews(IDXGISwapChain* sc) {
     return true;
 }
 
-// 释放与交换链尺寸绑定的资源。设备/队列/分配器/围栏/SRV 堆都保留 ——
-// 它们在 ResizeBuffers 前后依然有效, 重建它们纯属浪费且容易出错。
+// 释放与交换链尺寸绑定的资源; 设备/队列/分配器/围栏/SRV 堆一律保留(与尺寸无关)。
 void releaseSizeDependent() {
     if (g.rtvHeap) { g.rtvHeap->Release(); g.rtvHeap = nullptr; }
 }
 
-// 交换链尺寸或后缓冲数量变化时, 重建与尺寸绑定的那一小部分。
+// 交换链尺寸/后缓冲数量变化时重建。调用方需持 gMu。
 bool rebuildForSwapchain(IDXGISwapChain* sc, UINT newCount, UINT newW, UINT newH) {
     if (!g.device) return false;
 
-    // 1) 等自己的队列跑完。不等的话, GPU 可能还在读我们即将重建的那些资源。
+    // 先等自己的队列跑完, 否则 GPU 可能还在读即将被丢掉的资源。
     waitGpu();
 
-    // 2) 丢掉旧的 RTV 堆。注意**不碰** ImGui 的 SRV 堆: 字体纹理与 ImGui
-    //    后端状态跟交换链尺寸无关, 重建它们只会引入新的失败点。
+    // ⚠️ 不碰 ImGui 的 SRV 堆: 字体纹理与交换链尺寸无关, 重建只会引入新的失败点。
     releaseSizeDependent();
 
     g.backbufferCount = newCount;
@@ -338,9 +308,7 @@ bool rebuildForSwapchain(IDXGISwapChain* sc, UINT newCount, UINT newW, UINT newH
     return createBackBufferViews(sc);
 }
 
-// ImGui 初始化
 bool createImGui(IDXGISwapChain* sc) {
-    // 窗口句柄 —— 输入要靠它
     IDXGISwapChain1* sc1 = nullptr;
     if (SUCCEEDED(sc->QueryInterface(__uuidof(IDXGISwapChain1),
                                      reinterpret_cast<void**>(&sc1))) && sc1) {
@@ -348,7 +316,6 @@ bool createImGui(IDXGISwapChain* sc) {
         sc1->Release();
     }
     if (!g.hwnd) {
-        // 退路: 用当前前台窗口(理论上不该走到这)
         g.hwnd = ::GetForegroundWindow();
     }
 
@@ -361,10 +328,8 @@ bool createImGui(IDXGISwapChain* sc) {
 
     ImGui::StyleColorsDark();
 
-    // 界面统一用英文, 所以直接用 ImGui 内置的默认字体即可 ——
-    // 不加载中文字体, 省掉 18 MB 的字体依赖和一份大图集。
-    // (内置字体只有 ASCII, 一旦混入中文就会显示成 '?', 所以 UI 文案里不要写中文。)
-
+    // ⚠️ 面板文案必须纯 ASCII 英文: 界面统一英文所以直接用 ImGui 内置字体,
+    //    而内置字体只有 ASCII, 混入中文会被渲染成一串 '?'。
     if (!ImGui_ImplWin32_Init(g.hwnd)) {
         g.error = "ImGui_ImplWin32_Init 失败";
         return false;
@@ -386,12 +351,8 @@ bool createImGui(IDXGISwapChain* sc) {
         return false;
     }
 
-    // 显式建一次设备对象(PSO / 字体纹理), 并把结果记下来。
-    // 为什么必须显式查: 后端在懒加载失败时只有一句
-    //     IM_ASSERT(0 && "ImGui_ImplDX12_CreateDeviceObjects() failed!");
-    // 而 Release 构建里 IM_ASSERT 展开成空操作 —— 于是 PSO 没建出来时,
-    // 一切"看起来"都成功(几何体有、提交成功、围栏完成), 但 SetPipelineState
-    // 绑的是空对象, 屏幕上什么都没有。这个坑很难从现象反推。
+    // 必须显式检查: Release 构建里后端懒加载失败的 IM_ASSERT 是空操作 ——
+    // PSO 没建出来时一切"看起来"都成功, 但屏幕上什么都没有。
     if (!ImGui_ImplDX12_CreateDeviceObjects()) {
         g.error = "ImGui_ImplDX12_CreateDeviceObjects 失败(PSO/字体纹理没建出来)";
         trace(fmt("  [overlay] {}", g.error));
@@ -399,7 +360,7 @@ bool createImGui(IDXGISwapChain* sc) {
     }
     trace("  [overlay] 设备对象(PSO/字体纹理)创建成功");
 
-    // 接收输入
+    // 挂钩窗口过程接收输入
     g.origWndproc = reinterpret_cast<WNDPROC>(
         ::SetWindowLongPtrW(g.hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&wndproc)));
     if (!g.origWndproc) {
@@ -410,7 +371,7 @@ bool createImGui(IDXGISwapChain* sc) {
 }
 
 // --------------------------------------------------------------- 面板
-// 全部文案用英文: 内置字体只有 ASCII, 中文会变成 '?'。
+// ⚠️ 面板文案必须纯 ASCII 英文 —— 内置字体没有中文字形, 中文会变成 '?'。
 void panelEngine() {
     auto& eng = engine();
     const auto& objs = eng.objects();
@@ -439,7 +400,7 @@ void panelEngine() {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "GNames        not located");
     }
 
-    auto slot = [](char const* label, ue::GlobalSlot const& s) {
+    auto slot = [](char const* label, game::ue::GlobalSlot const& s) {
         if (s.value) {
             ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "%s  %s %s", label,
                                s.objectClass.c_str(), s.objectName.c_str());
@@ -492,7 +453,7 @@ void panelObjects() {
         std::string f = toLower(gFilter);
 
         int scanned = 0, matched = 0;
-        eng.objects().for_each([&](ue::ObjectStat const& st) {
+        eng.objects().for_each([&](game::ue::ObjectStat const& st) {
             ++scanned;
             if (!f.empty()) {
                 if (!icontains(st.name, f) && !icontains(st.className, f)) return true;
@@ -532,7 +493,6 @@ void panelObjects() {
 }
 
 void drawUi() {
-    // 游戏在跑的时候别铺满屏, 给个固定大小、可拖动的窗口
     ImGui::SetNextWindowSize(ImVec2(560, 420), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowPos(ImVec2(60, 60), ImGuiCond_FirstUseEver);
 
@@ -574,9 +534,9 @@ void drawUi() {
 
 } // namespace
 
-// ===========================================================================
+// ---------------------------------------------------------------------------
 //  对外接口
-// ===========================================================================
+// ---------------------------------------------------------------------------
 bool initialized() noexcept { return g.initialized; }
 bool visible() noexcept { return g.visible; }
 void setVisible(bool v) noexcept { g.visible = v; }
@@ -587,7 +547,7 @@ bool init(IDXGISwapChain* swapchain) {
     if (g.initialized) return true;
     if (!swapchain) { g.error = "swapchain 为空"; return false; }
 
-    // 重入保护: 万一在初始化途中又有 Present 进来
+    // 重入保护: 初始化途中又进来一次 Present。
     static std::atomic<bool> inProgress{false};
     if (inProgress.exchange(true)) return false;
 
@@ -612,15 +572,10 @@ bool init(IDXGISwapChain* swapchain) {
     return ok;
 }
 
-// 交换链尺寸/后缓冲数量是否与我们已经建好的资源一致。
-//
-// ⚠️ 这是 D3D12 覆盖层最经典的一处致命疏漏, 本项目的真机崩溃就是它:
-//   窗口改尺寸、切全屏、改分辨率都会让 DXGI **重建后缓冲**。此时旧的
-//   ID3D12Resource* 全部作废, 而我们缓存着按旧数量建的 RTV 堆 —— 继续拿
-//   旧 RTV 去 OMSetRenderTargets 就等于把"已经不存在的后缓冲"绑成渲染目标。
-//   D3D12 不会在 CPU 侧报错(命令照常记录、提交也成功), 但 GPU 侧会挂死,
-//   表现为 UE 弹出 "GPU Crash dump Triggered" 并留下 .nv-gpudmp ——
-//   日志里一切正常, 完全看不出问题在哪。
+// 交换链尺寸/后缓冲数量是否与已建好的资源一致。
+// ⚠️ 这是必须处理的硬约束: 改窗口尺寸/切全屏会让 DXGI 重建后缓冲, 旧的
+//    ID3D12Resource*/RTV 全部作废。继续绑旧 RTV 时 D3D12 在 CPU 侧不报错,
+//    但 GPU 侧会挂死(UE 弹 GPUCrash) —— 根因记录见 docs/payload/overlay.md
 bool needsRebuild(IDXGISwapChain* swapchain, UINT& outCount, UINT& outW, UINT& outH) {
     DXGI_SWAP_CHAIN_DESC desc{};
     if (FAILED(swapchain->GetDesc(&desc))) return false;
@@ -629,14 +584,14 @@ bool needsRebuild(IDXGISwapChain* swapchain, UINT& outCount, UINT& outW, UINT& o
     outW = desc.BufferDesc.Width;
     outH = desc.BufferDesc.Height;
     if (outW == 0 || outH == 0) {
-        // 有些情况 GetDesc 不给尺寸(比如刚 ResizeBuffers 过), 退回窗口客户区。
+        // GetDesc 有时不给尺寸(刚 ResizeBuffers 过), 退回窗口客户区。
         RECT rc{};
         if (::GetClientRect(g.hwnd, &rc)) {
             outW = static_cast<UINT>(rc.right - rc.left);
             outH = static_cast<UINT>(rc.bottom - rc.top);
         }
     }
-    if (outW == 0 || outH == 0) return false;   // 拿不到就别动, 免得越修越坏
+    if (outW == 0 || outH == 0) return false;   // 判不出来就别动, 免得越修越坏
 
     if (outCount == g.backbufferCount && outW == g.width && outH == g.height) return false;
     return true;
@@ -645,8 +600,7 @@ bool needsRebuild(IDXGISwapChain* swapchain, UINT& outCount, UINT& outW, UINT& o
 void render(IDXGISwapChain* swapchain) {
     if (!g.initialized || !swapchain) return;
 
-    // ---- 尺寸变化检测 ----
-    // 必须在**取后缓冲之前**做: 一旦尺寸变了, 后面的 RTV/视口/裁剪全是错的。
+    // ⚠️ 尺寸变化检测必须在**取后缓冲之前**做(见 needsRebuild)。
     {
         UINT newCount = 0, newW = 0, newH = 0;
         if (needsRebuild(swapchain, newCount, newW, newH)) {
@@ -654,11 +608,9 @@ void render(IDXGISwapChain* swapchain) {
                       g.width, g.height, g.backbufferCount, newW, newH, newCount));
 
             std::lock_guard lk(gMu);
-            // 只重建与尺寸绑定的一小部分: RTV 堆 + 每个后缓冲的 RTV。
-            // 设备/队列/分配器/围栏/SRV 堆与尺寸无关, 一律保留。
+            // 只重建与尺寸绑定的一小部分; 设备/队列/分配器/围栏/SRV 堆一律保留。
             if (!rebuildForSwapchain(swapchain, newCount, newW, newH)) {
-                // 重建失败: 标记为未初始化, 让上层下一帧重新走 init。
-                // 比继续用半套资源去渲染安全得多。
+                // 重建失败: 标记未初始化, 让上层下一帧重走 init —— 比用半套资源安全。
                 g.initialized = false;
                 trace(fmt("  [overlay] 重建失败, 暂停渲染: {}", g.error));
                 return;
@@ -668,7 +620,7 @@ void render(IDXGISwapChain* swapchain) {
         }
     }
 
-    // 帧率统计
+    // 帧率统计(指数平滑)
     {
         const double t = nowSeconds();
         static double last = 0.0;
@@ -689,18 +641,15 @@ void render(IDXGISwapChain* swapchain) {
 
     ImDrawData* dd = ImGui::GetDrawData();
 
-    // 诊断: 每 120 帧打一次关键量。渲染出问题时, 这几个数字能直接指出断层
-    // 在哪一环 —— 是 UI 没生成几何体, 还是几何体生成但没画上去。
+    // 诊断: 每 97 帧(奇数)打一次关键量 —— 用来判断断层在"没生成几何体"
+    // 还是"生成了没画上去"。
     static uint64_t dbg = 0;
     ++dbg;
-    // 用奇数间隔采样 —— 交换链是两个后缓冲, 偶数间隔会永远落在同一个奇偶性上,
-    // 看不出 bb 到底有没有在 0/1 之间交替。
+    // 用奇数间隔采样: 交换链两个后缓冲, 偶数间隔会永远落在同一奇偶性上看不出交替。
     const bool dbgNow = (dbg % 97 == 1);
     if (dbgNow) {
         const ImGuiIO& io = ImGui::GetIO();
-        // TexID 就是 GPU 描述符句柄, 后端在绘制时直接拿它去
-        // SetGraphicsRootDescriptorTable(1, ...)。如果它是 0, 说明字体纹理
-        // 的 SRV 没分配成功 —— 那么一切都会"成功"但什么都画不出来。
+        // TexID 是 GPU 描述符句柄; 为 0 说明字体纹理的 SRV 没分配成功。
         UINT64 texid = 0;
         if (dd && dd->Textures && dd->Textures->Size > 0) {
             texid = static_cast<UINT64>((*dd->Textures)[0]->TexID);
@@ -712,9 +661,8 @@ void render(IDXGISwapChain* swapchain) {
                   dd ? dd->CmdListsCount : -1, dd ? dd->TotalVtxCount : -1,
                   g.srv.allocCount, g.srv.gpuBase.ptr, texid));
     }
-    if (!dd || dd->CmdListsCount == 0) return;   // 没有内容, 一帧 GPU 活都不干
+    if (!dd || dd->CmdListsCount == 0) return;   // 没有内容就不干 GPU 活
 
-    // ---- 取后缓冲 ----
     const UINT idx = g.frameIndex % kFramesInFlight;
     IDXGISwapChain3* sc3 = nullptr;
     UINT bbIndex = idx;
@@ -730,7 +678,6 @@ void render(IDXGISwapChain* swapchain) {
         return;
     }
 
-    // ---- 记录命令 ----
     if (FAILED(g.alloc[idx]->Reset())) { backbuffer->Release(); return; }
     if (FAILED(g.list->Reset(g.alloc[idx], nullptr))) { backbuffer->Release(); return; }
 
@@ -746,11 +693,8 @@ void render(IDXGISwapChain* swapchain) {
     rtv.ptr += static_cast<SIZE_T>(bbIndex) * g.rtvInc;
     g.list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 
-    // ⚠️ 必须显式设视口。D3D12 的视口默认是空的(全 0), 不是"整个渲染目标";
-    //    ImGui 的 DX12 后端也不会替你设 —— 官方示例里是宿主自己调
-    //    RSSetViewports 的。漏了这一步的后果是: 一切看起来都成功(初始化、
-    //    提交、Present 都没报错), 但屏幕上什么都没有, 因为几何体全在
-    //    零尺寸视口之外被裁掉了。
+    // ⚠️ 必须显式设视口: D3D12 的视口默认是全 0(不是"整个渲染目标"), ImGui 的
+    //    DX12 后端也不替你设 —— 漏了就是"一切成功但屏幕上什么都没有"。
     D3D12_VIEWPORT vp{};
     vp.TopLeftX = 0.0f;
     vp.TopLeftY = 0.0f;
@@ -804,11 +748,10 @@ void shutdown() {
     if (g.fenceEvent) ::CloseHandle(g.fenceEvent);
     if (g.rtvHeap)    g.rtvHeap->Release();
     if (g.srv.heap)    g.srv.heap->Release();
-    // ⚠️ 不释放 g.queue —— 那是游戏的队列, 我们只是持有指针, 没有引用计数份额。
-    //    在这里 Release 会减掉不属于我们的一次引用。
+    // ⚠️ 不释放 g.queue —— 那是游戏的队列, 我们只持有指针, 没有引用计数份额。
     if (g.device)      g.device->Release();
 
-    // 注意: 不能用 memset —— State 里有 std::string, 那样会破坏它的内部指针。
+    // 不能用 memset: State 里有 std::string, 那样会破坏它的内部指针。
     const bool wasVisible = g.visible;
     g = State{};
     g.visible = wasVisible;

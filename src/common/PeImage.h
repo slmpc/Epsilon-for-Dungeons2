@@ -1,8 +1,4 @@
-// ============================================================================
-//  peImage.h — 轻量 PE 解析(容器无关)
-//  两端共用: 注入器用它算静态 RVA, 注入体用它拿模块节区表做内存扫描。
-//  刻意不依赖任何 Windows 头 —— 同一份代码可以拿磁盘文件或进程内存喂进来。
-// ============================================================================
+// PeImage.h — 轻量 PE 解析(容器无关): 同一份代码可喂磁盘文件或进程内存。
 #pragma once
 
 #include <cstdint>
@@ -14,9 +10,9 @@
 namespace epsilon {
 
 struct PeSection {
-    std::string name;       // 最多 8 字符, 已去掉尾部 NUL
-    uint32_t    vsize = 0;  // VirtualSize
-    uint32_t    vaddr = 0;  // RVA
+    std::string name;
+    uint32_t    vsize = 0;
+    uint32_t    vaddr = 0;
     uint32_t    rawSize = 0;
     uint32_t    rawPtr = 0;
     uint32_t    characteristics = 0;
@@ -29,9 +25,8 @@ struct PeSection {
 
 class PeImage {
 public:
-    // 从磁盘加载(注入器用它读 Shipping.exe 的静态布局)。
+    // fromFile 读磁盘映像, fromMemory 读已映射映像; 解析失败返回 nullopt。
     [[nodiscard]] static std::optional<PeImage> fromFile(std::wstring_view path);
-    // 从已映射的内存加载(注入体用它读自身所在模块)。
     [[nodiscard]] static std::optional<PeImage> fromMemory(const void* base);
 
     [[nodiscard]] bool     valid()     const { return valid_; }
@@ -45,11 +40,9 @@ public:
     [[nodiscard]] std::vector<PeSection> const& sections() const { return sections_; }
     [[nodiscard]] PeSection const* section(std::string_view name) const;
 
-    // RVA → 映射内存里的实际指针。base 为模块运行时基址。
+    // base 必须是模块的运行时基址; sectionAt / section 找不到时返回 nullptr。
     [[nodiscard]] void const* rvaPtr(const void* base, uint32_t rva) const;
-    // 该 RVA 落在哪个节区(找不到返回 nullptr)。
     [[nodiscard]] PeSection const* sectionAt(uint32_t rva) const;
-    // 某个节的 RVA 边界。
     [[nodiscard]] std::optional<std::pair<uint32_t, uint32_t>> sectionRange(std::string_view name) const;
 
     [[nodiscard]] std::string const& path() const { return path_; }
@@ -66,20 +59,16 @@ private:
     size_t                    sizeOfHeaders_ = 0;
     uint16_t                  characteristics_ = 0;
     std::vector<PeSection>    sections_;
-    std::vector<uint8_t>      fileData_;   // fromFile 时持有
+    std::vector<uint8_t>      fileData_;
     std::string               path_;
 };
 
-// 用 __try/__except 安全地探测一段内存是否可读(任意地址, 不会崩)。
-// 这是整套框架在目标进程里"乱指指针不崩"的基础。
+// 用 __try/__except 探测可读性 —— 目标进程里乱指指针不崩的基础。
 bool probeReadable(const void* addr, size_t size) noexcept;
 
-// 安全读: 先探测再拷贝。失败返回 false, 不动 out。
+// 读目标进程内存一律走这两个入口(不要直接解引用): 失败返回 false 且不改动 dst,
+// safeWrite 先直写, 失败才放宽页保护, 写完恢复。
 bool safeRead(void* dst, const void* src, size_t size) noexcept;
-
-// 安全写: 必要时先放宽页保护, 写入, 再恢复保护。全程 SEH 保护。
-// 用于"改游戏数据"这类操作 —— 目标地址可能是只读页, 直接写会抛访问冲突
-// 把游戏带崩。
 bool safeWrite(void* dst, const void* src, size_t size) noexcept;
 
 // 模板包装: 读一个 POD,T 必须是平凡可拷贝类型。

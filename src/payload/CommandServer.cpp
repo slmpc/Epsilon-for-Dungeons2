@@ -708,6 +708,32 @@ void CommandServer::cmdMovement() {
     show("AirControl",       o.airControl);
     show("MaxAcceleration",  o.maxAcceleration);
     show("MovementSpeedMultiplier", o.speedMultiplier);
+
+    // ---- 邻域浮点 ----
+    // 排查用: 属性表给出的偏移在这一片区域里彼此相邻, 把整段按浮点打出来,
+    // 就能直接看出哪个槽是"值"、哪个是"它的倒数"之类的派生量。
+    // 实测线索: 有一个 37 字节的 setter 同时写 +0x230 与 1/(+0x230) 到 +0x234,
+    // 说明这两个槽是一对, 只改其中一个会破坏不变量。
+    if (t.movement) {
+        emitLine("");
+        emitLine("  --- float neighbourhood ---");
+        // 0x1a0 区: 跳跃相关; 0x22c 区: 速度相关(与属性表相邻)
+        // 0x1010 区: **游戏自己的速度源**。反汇编发现一个 56 字节函数每帧做
+        //      a1[141] = a1[1030]   -> +0x234 = +0x1018
+        //      a1[158] = a1[1031]   -> +0x278 = +0x101C
+        //      a1[163] = a1[1032]   -> +0x28C = +0x1020
+        // 即 UE 字段是从游戏自己的速度值"复制"过来的。所以要改的可能是
+        // +0x1018 而不是 +0x234 —— 改后者会被这个复制覆盖。
+        for (int32_t base : {0x1a0, 0x22c, 0x1010}) {
+            emitFmt("  +{:#x}:", base);
+            for (int i = 0; i < 8; ++i) {
+                auto v = mv.readFloat(base + i * 4);
+                emitFmt("      +{:#05x} {:<12}",
+                         base + i * 4,
+                         v ? fmt("{:.4f}", *v) : std::string("?"));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -776,16 +802,32 @@ void CommandServer::setMovementValue(std::string_view field, float value) {
 
     auto before = mv.readFloat(off);
     const bool ok = mv.writeFloat(off, value);
-    ::Sleep(50);                        // 给游戏一帧时间去覆盖(如果它会覆盖)
-    auto after = mv.readFloat(off);
 
     emitFmt("{} @ {} : {} -> {}  (write {})",
              field, fmt("+{:#x}", off),
              before ? fmt("{:.3f}", *before) : std::string("?"),
-             after  ? fmt("{:.3f}", *after)  : std::string("?"),
+             ok ? fmt("{:.3f}", value) : std::string("FAILED"),
              ok ? "ok" : "FAILED");
-    if (after && std::fabs(*after - value) > 0.01f) {
-        emitLine("  note: value did not stick 50ms after write -> the game overwrites it");
+
+    // 写入后连续采样。单次 50ms 复查只能区分"立刻被覆盖", 采样多次才能看出
+    // 覆盖是持续发生(每帧重算)还是偶发(某个事件触发)。
+    emit("    samples: ");
+    int reverted = 0;
+    for (int i = 0; i < 8; ++i) {
+        ::Sleep(40);
+        auto now = mv.readFloat(off);
+        if (!now) { emit("?"); break; }
+        emit(fmt("{:.1f} ", *now));
+        if (std::fabs(*now - value) > 0.01f) ++reverted;
+    }
+    emitLine("");
+    if (reverted == 0) {
+        emitLine("    -> 值保持住了(8 次采样都没被改回)");
+    } else if (reverted >= 6) {
+        emitLine("    -> 值基本立刻被改回: 该字段被游戏每帧重算, 直写压不住");
+    } else {
+        emitFmt("    -> 值被改回 {}/8 次: 覆盖是间歇性的(可能由某个事件触发)",
+                 reverted);
     }
 }
 

@@ -56,16 +56,18 @@ foreach(_cfg IN ITEMS DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${_cfg} "${CMAKE_BINARY_DIR}/bin")
 endforeach()
 
-# ---------------------------------------------------------------- 依赖: MinHook + ImGui (vcpkg)
+# ---------------------------------------------------------------- 依赖: MinHook + ImGui + JSON (vcpkg)
 # 依赖声明在 vcpkg.json 里(manifest 模式)。
 # 配置时必须带上工具链文件, 本仓库的 CMakePresets.json 已内置:
 #     cmake --preset release
 # 或直接跑 .\scripts\build.ps1
 find_package(minhook CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 message(STATUS "MinHook: ${minhook_DIR}")
 message(STATUS "ImGui  : ${imgui_DIR}")
+message(STATUS "JSON   : ${nlohmann_json_DIR}")
 
 # ---------------------------------------------------------------- 公共层
 add_library(epsilonCommon STATIC
@@ -97,14 +99,23 @@ add_library(epsilonPayload SHARED
     src/payload/ue/ObjectArray.cpp
     src/payload/ue/Reflection.cpp
     src/payload/ue/World.cpp
+    src/payload/feature/settings/Setting.cpp
+    src/payload/feature/module/Module.cpp
+    src/payload/feature/module/ModuleManager.cpp
+    src/payload/feature/config/ConfigManager.cpp
 )
 target_include_directories(epsilonPayload PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/payload")
 # dxgi / d3d12 是必须的: 我们自己的代码走 GetProcAddress, 但 ImGui 的 DX12
 # 后端(imgui_impl_dx12.cpp)直接调用了 CreateDXGIFactory1 等符号。
+# shell32/ole32: ConfigManager 用 SHGetKnownFolderPath 取用户目录, 该函数
+#   需要 ole32 的 CoTaskMemFree 来释放它返回的字符串。
 target_link_libraries(epsilonPayload PRIVATE
     epsilonCommon
     minhook::minhook
     imgui::imgui
+    nlohmann_json::nlohmann_json
+    shell32
+    ole32
     dxgi
     d3d12
 )

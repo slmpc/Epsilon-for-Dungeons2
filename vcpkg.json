@@ -6,6 +6,10 @@
   "license": "MIT",
   "dependencies": [
     {
+      "name": "nlohmann-json",
+      "platform": "windows & !uwp"
+    },
+    {
       "name": "minhook",
       "platform": "windows & !uwp"
     },

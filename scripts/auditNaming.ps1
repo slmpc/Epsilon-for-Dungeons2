@@ -47,6 +47,18 @@ $allowed = @(
     '^int8_t$', '^int16_t$', '^int32_t$', '^int64_t$', '^uint8_t$', '^uint16_t$',
     '^uint32_t$', '^uint64_t$', '^uintptr_t$', '^intptr_t$', '^wchar_t$', '^char16_t$',
     '^to_string$', '^starts_with$', '^ends_with$', '^find_last_of$', '^find_first_of$',
+    # nlohmann/json 的谓词与访问器(第三方 API, 必须保持原样)
+    '^is_null$', '^is_boolean$', '^is_number$', '^is_string$', '^is_array$', '^is_object$',
+    '^is_number_integer$', '^is_number_float$', '^is_discarded$', '^is_primitive$',
+    '^is_structured$', '^error_handler_t$', '^get_impl$', '^from_json$', '^to_json$',
+    # 注释里出现的类名/库名, 不是标识符
+    '^magic_enum$', '^auto_sprint$',
+    # std::filesystem 谓词与访问器
+    '^is_directory$', '^is_regular_file$', '^is_symlink$', '^is_empty$',
+    '^directory_iterator$', '^recursive_directory_iterator$', '^remove_all$',
+    '^create_directories$', '^current_path$', '^temp_directory_path$',
+    # unordered_map / 其它 STL 类型
+    '^unordered_map$', '^unordered_set$', '^deque$', '^optional$',
     # more Win32 SDK spellings
     '^GWLP_', '^GWL_', '^LONG_PTR$', '^GET_MODULE_HANDLE_EX_FLAG', '^ACCESS_DENIED$',
     '^CW_', '^CS_', '^IDC_', '^SW_', '^OFN_', '^RPC_', '^SECURITY_', '^SE_',

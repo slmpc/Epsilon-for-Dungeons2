@@ -240,3 +240,15 @@ exception code / exception address / fault address，换算 RVA 后回 IDA 定�
   「怎么验证的」，便于游戏更新后复现
 - 一次性诊断程序放在 `build/` 下手工编译，**不要加进 CMakeLists**（`build/` 已在 `.gitignore` 中）
 - 注入体驻留期间**无法重新注入新构建** —— 迭代时换个 DLL 文件名，或重启游戏
+
+---
+
+## 许可
+
+本项目以 **All Rights Reserved（保留所有权利）** 发布，见 [`LICENSE`](LICENSE)。
+
+- 未经版权所有者书面许可，**不得**复制、再发布、修改、演绎或用于商业用途
+- 允许通过 fork / 引用链接查看与讨论
+- 第三方依赖（MinHook / ImGui / nlohmann-json，见 `vcpkg.json`）遵循各自上游许可，**不在**本项目许可范围内
+- 本仓库**不含**任何游戏本体文件或游戏资产；与 Mojang Studios / Microsoft 无关联
+

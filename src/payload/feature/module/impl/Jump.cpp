@@ -40,7 +40,11 @@ JumpModule::JumpModule()
     auto& t = addBool("Notify", false, "Print resolution details once on enable");
     logOnce_ = &t;
 
-    setHidden(false);
+    // 必须用 setDefaultHidden: setHidden 只改当前值, 而 ConfigManager 加载配置时
+    // 会调用 Module::reset(), reset() 把 hidden 恢复成 defaultHidden_(默认 true),
+    // 于是"构造期设为可见"会被这份 reset 抹掉, 表现为模块明明注册了却不出现在
+    // 面板列表里。键位也是同一类坑(见 setDefaultKeyBind)。
+    setDefaultHidden(false);
 }
 
 void JumpModule::onEnable() {

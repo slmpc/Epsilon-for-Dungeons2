@@ -52,7 +52,9 @@ SpeedModule::SpeedModule()
     auto& n = addBool("Notify", false, "Print resolution details once on enable");
     notify_ = &n;
 
-    setHidden(false);
+    // setDefaultHidden, 不是 setHidden —— 理由同 Jump.cpp: ConfigManager 加载时
+    // 会 reset(), 把 hidden 恢复成 defaultHidden_(true), 模块会从面板上消失。
+    setDefaultHidden(false);
 }
 
 SpeedModule::Sink SpeedModule::currentSink() const {

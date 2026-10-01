@@ -309,12 +309,14 @@ bool PlayerMovement::resolveOffsets(Engine& engine) {
     // Speed 模块因此固定作用在 MaxWalkSpeed 上。
 
     offsets_ = o;
-    offsetSource_ = fromTable ? fmt("静态表(反射得到 {} 个属性)", reflected)
-                              : std::string("反射");
+    // 纯 ASCII: 这个字符串会显示在游戏内的 ImGui 面板上(那里没有中文字形)。
+    offsetSource_ = fromTable ? fmt("table ({} reflected)", static_cast<uint64_t>(reflected))
+                              : std::string("reflection");
 
     if (!offsets_.hasCore()) {
-        lastError_ = fmt("{}: 反射+静态表都没能给出 MaxWalkSpeed/JumpZVelocity (反射 {} 个属性)",
-                         target_.movementClassName, reflected);
+        lastError_ = fmt("{}: neither reflection nor the known-offset table gave "
+                         "MaxWalkSpeed/JumpZVelocity",
+                         target_.movementClassName);
         return false;
     }
     return true;

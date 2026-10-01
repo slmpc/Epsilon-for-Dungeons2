@@ -548,69 +548,91 @@ void CommandServer::dumpStructPointerSlots(uint64_t structObj) {
     }
 
     // 只对第一个类自动做 FField 名字偏移探测。
-    // 属性链读不出来的原因只剩两种: 链起点偏移错, 或 NamePrivate 偏移错。
     //
-    // ⚠️ 候选不能瞎挑。实测教训: 我先按"值在模块映像范围外"挑第一个槽, 结果
-    // 选中了 +0x20 —— 那里存的是**类的包名指针**(解出 "/Script/Dungeons"),
-    // 于是名字偏移探测完全跑偏。
+    // ⚠️ 判据的演进(两次踩坑):
+    //   1. "值落在模块映像范围外" —— 太弱, 包名字符串指针同样满足。
+    //   2. "某个偏移能解出一个像标识符的 FName" —— 仍然太弱。实测它给出
+    //      "MaterialLayersFunctionsTree", 与 CharacterMovementComponent 毫无
+    //      关系, 是纯噪声。
     //
-    // 更好的判据是"这个指针像不像 FField": 在它身上试各个候选名字偏移,
-    // 看能解出多少个**合法的 FName**。真实的 FField 在正确偏移上会稳定给出
-    // 一个名字; 包名指针之类只会在某个偏移偶然命中一次。
+    //   真正可靠的不变量是**链的自洽性**: FProperty 是一条 Next 链, 若偏移 X
+    //   是真正的 NamePrivate, 那么沿链每个节点在 X 处都应解出合法名字。
+    //   垃圾指针凑不出这种"连续多跳都自洽"的性质。
     if (plausible > 0 && fieldProbeBudget_ > 0) {
         --fieldProbeBudget_;
 
-        uint32_t bestSlot = 0;
-        uint32_t bestOff = 0;
-        uint64_t bestAddr = 0;
-        std::string bestName;
+        // 试着沿 Next 走几步, 统计有多少跳能在给定名字偏移上解出名字。
+        auto chainScore = [&](uint64_t first, uint32_t nameOff, std::vector<std::string>* names) {
+            uint64_t f = first;
+            int ok = 0;
+            std::vector<uint64_t> visited;
+            for (int hop = 0; hop < 6 && f; ++hop) {
+                bool loop = false;
+                for (uint64_t v : visited) if (v == f) { loop = true; break; }
+                if (loop) break;
+                visited.push_back(f);
+
+                int32_t idx = 0;
+                if (!safeRead(&idx, reinterpret_cast<const void*>(f + nameOff), 4)) break;
+                if (idx <= 0) break;
+                const std::string nm = eng_.names().resolve(idx);
+                if (nm.empty()) break;
+                // 含 '/' 的是包名/路径, 不是字段名。
+                if (nm.find('/') != std::string::npos) break;
+                if (names) names->push_back(nm);
+                ++ok;
+
+                uint64_t next = 0;
+                if (!safeRead(&next, reinterpret_cast<const void*>(f + layout.fieldNext), 8)) break;
+                f = next;
+            }
+            return ok;
+        };
+
         int bestScore = 0;
+        uint32_t bestSlot = 0, bestOff = 0;
+        uint64_t bestAddr = 0;
+        std::vector<std::string> bestNames;
 
         for (uint32_t slot = 0x20; slot <= 0x98; slot += 8) {
             uint64_t cand = 0;
             if (!safeRead(&cand, reinterpret_cast<const void*>(structObj + slot), 8)) continue;
             if (cand < 0x10000 || cand > 0x7FFFFFFFFFFF) continue;
-            // FField 是堆对象, 不会落在 Shipping.exe 的映像区间里。
             if (cand >= eng_.moduleBase() && cand < eng_.moduleBase() + eng_.moduleSize()) continue;
 
-            // 在候选地址上试各个名字偏移, 统计能解出合法名字的个数。
-            // 真正的 FField 只会在**一个**偏移上给出名字, 所以这里看的是
-            // "有没有解出名字", 而不是"解出几个"。为区分真假, 额外要求解出的
-            // 名字不是明显的基础设施串(包名/路径)。
             for (uint32_t off = 0x18; off <= 0x48; off += 4) {
-                int32_t idx = 0;
-                if (!safeRead(&idx, reinterpret_cast<const void*>(cand + off), 4)) continue;
-                if (idx <= 0) continue;
-                const std::string nm = eng_.names().resolve(idx);
-                if (nm.empty()) continue;
-                if (nm.find('/') != std::string::npos) continue;   // 路径/包名, 不是字段名
-
-                // 打分: 名字看起来像字段名(标识符形态)的优先。
-                int score = 1;
-                const bool looksIdentifier =
-                    !nm.empty() && std::isalpha(static_cast<unsigned char>(nm[0]));
-                if (looksIdentifier) score += 3;
+                std::vector<std::string> names;
+                const int score = chainScore(cand, off, &names);
                 if (score > bestScore) {
                     bestScore = score;
                     bestSlot = slot;
                     bestOff = off;
                     bestAddr = cand;
-                    bestName = nm;
+                    bestNames = std::move(names);
                 }
             }
         }
 
-        if (bestScore > 0) {
+        if (bestScore > 1) {
             emitLine("");
-            emitFmt("      [自动探测] 最佳候选: 槽 +{:#x} -> {} , 名字偏移 +{:#x}",
-                     bestSlot, hex(bestAddr, 16), bestOff);
-            emitFmt("                 解出 \"{}\" (评分 {})", sanitize(bestName, 40), bestScore);
-            emitLine("      -> 若这个名字是该类的某个真实属性名, 这两个偏移就都定下来了:");
-            emitFmt("         FField::NamePrivate = +{:#x} (当前常量是 +{:#x})",
-                     bestOff, layout.fieldName);
+            emitFmt("      [自动探测] 链自洽最佳: 槽 +{:#x} -> {} , 名字偏移 +{:#x} , 连续 {} 跳",
+                     bestSlot, hex(bestAddr, 16), bestOff, bestScore);
+            std::string chain;
+            for (size_t i = 0; i < bestNames.size() && i < 6; ++i) {
+                if (i) chain += " -> ";
+                chain += bestNames[i];
+            }
+            emitFmt("                 链上名字: {}", sanitize(chain, 90));
+            if (bestOff != layout.fieldName) {
+                emitFmt("      -> FField::NamePrivate 实际为 +{:#x} (当前常量 +{:#x}) 建议固化",
+                         bestOff, layout.fieldName);
+            } else {
+                emitLine("      -> 名字偏移与常量一致, 那么问题在链起点偏移上。");
+            }
         } else {
             emitLine("");
-            emitLine("      [自动探测] 没有候选能解出像字段名的 FName —— 换个大类再试。");
+            emitFmt("      [自动探测] 没有候选能连续自洽(最好只有 {} 跳) —— 换个大类再试。",
+                     bestScore);
         }
     }
 }

@@ -80,6 +80,18 @@ private:
     // 合法 FName, 直接把真实偏移定下来。
     void probeFFieldNameOffset(uint64_t fieldAddr);
 
+    // 绕开 FField 链, 直接从 UClass 里找某个属性的 FProperty* 并读出它的偏移。
+    //
+    // 为什么需要这条路: 本构建的 UStruct 布局被改过, 走 ChildProperties/Next
+    // 的传统链式遍历三种判据都失败(见 dumpStructPointerSlots 里的记录)。
+    // 但有一件事是确定的: UClass 对象内部**必然**存放着它各属性的 FName 索引,
+    // 因为引擎自己也要按名字查属性。
+    //
+    // 做法: 先从 GNames 里找出属性名对应的 FName 索引, 然后扫 UClass 的那一段
+    // 内存, 找哪个位置存的正好是这个索引; 命中处再按"附近有没有一个指向
+    // FProperty 的指针"来确认, 最后从该 FProperty 读出 Offset_Internal。
+    void findPropertyDirect(std::string_view className, std::string_view propName);
+
     // ---- 帧钩子 ----
     void cmdHooks();          // 显示状态
     void cmdHookInstall();   // 显式安装

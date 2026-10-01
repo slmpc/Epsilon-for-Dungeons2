@@ -176,6 +176,11 @@ bool CommandServer::execute(std::string_view line) {
             if (a) probeFFieldNameOffset(a); else emitLine("地址解析失败");
         }
     }
+    else if (cmd == "findprop" || cmd == "fp") {
+        // findprop <类名> <属性名> —— 绕开 FField 链直接定位属性偏移
+        if (rest.size() < 2) { emitLine("用法: findprop <类名> <属性名>"); }
+        else findPropertyDirect(rest[0], rest[1]);
+    }
     else if (cmd == "scanlevel") {
         // scanlevel <ULevel 地址> —— 在对象上找 TArray 形态的 Actors
         if (rest.empty()) { emitLine("用法: scanlevel <ULevel 地址>"); }
@@ -393,6 +398,140 @@ void CommandServer::probeFFieldNameOffset(uint64_t fieldAddr) {
     } else {
         emitLine("");
         emitLine("=> 真正的 FField::NamePrivate 偏移应当是解出属性名的那个。");
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  findPropertyDirect — 绕开 FField 链, 直接从 UClass 找回属性偏移
+//
+//  背景: 本构建的 UStruct 布局被改过, 传统的 ChildProperties/Next 链式遍历
+//  三种判据都失败了(见 dumpStructPointerSlots 注释里的两次踩坑记录)。
+//
+//  但有一条物理事实绕不过去: **UClass 对象内部必然存着它每个属性的 FName
+//  索引**, 因为引擎自己也要按名字查属性。于是可以反过来做:
+//     1. 在 GNames 里定位属性名("MaxWalkSpeed")对应的 FName 索引
+//     2. 扫 UClass 的那段内存, 找哪个位置存的正是这个索引 -> 找到 FField
+//     3. 在命中对象上扫"看起来像结构体偏移"的小整数 -> 得到 Offset_Internal
+//
+//  这样完全不依赖 ChildProperties 的位置, 也不需要猜 FField::Next 的布局。
+// ---------------------------------------------------------------------------
+void CommandServer::findPropertyDirect(std::string_view className, std::string_view propName) {
+    if (!eng_.ready()) { emitLine("引擎未定位"); return; }
+
+    const uint64_t cls = eng_.objects().findClass(className);
+    if (!cls) { emitFmt("找不到类 {}", className); return; }
+
+    emitFmt("=== 直接定位 {}::{} ===", className, propName);
+    emitFmt("UClass @ {}", hex(cls, 16));
+
+    // ---- 1) 在名字池里顺序找属性名, 拿到它的 FName 索引 ----
+    // 顺序走条目链(与 NamePool::score 同一套逻辑): 索引编码是
+    // (Block << 16) | ByteOffset, 且字节偏移在索引里是**除以 2** 存的。
+    int32_t foundIndex = -1;
+    {
+        auto& np = eng_.names();
+        // 从块 0 起始处逐条前进。名字池第一个块足够容纳我们关心的引擎属性名。
+        uint64_t block0 = 0;
+        const uint64_t blocksAddr = np.blocksAddress();
+        std::string target(propName);
+
+        if (blocksAddr && safeRead(&block0, reinterpret_cast<const void*>(blocksAddr), 8) && block0) {
+            uint64_t p = block0;
+            for (int i = 0; i < 20000; ++i) {
+                uint16_t header = 0;
+                if (!safeRead(&header, reinterpret_cast<const void*>(p), 2)) break;
+                const bool wide = (header & 1) != 0;
+                const uint32_t len = (header >> 6) & 0x3FF;
+                if (len == 0 || len > 1023) break;
+
+                std::string name;
+                if (wide) {
+                    // 宽字符名字: 转成 UTF-8 再比(这里只关心 ASCII 属性名)
+                    name.reserve(len);
+                    for (uint32_t k = 0; k < len; ++k) {
+                        uint16_t ch = 0;
+                        if (!safeRead(&ch, reinterpret_cast<const void*>(p + 2 + k * 2), 2)) break;
+                        if (ch < 0x80) name += static_cast<char>(ch);
+                    }
+                } else {
+                    name.resize(len);
+                    if (!safeRead(name.data(), reinterpret_cast<const void*>(p + 2), len)) break;
+                }
+
+                if (name == target) {
+                    // 由字节偏移反推索引: index = (byteOffset / 2), 因为索引里
+                    // 存的是右移一位后的偏移。
+                    const uint64_t byteOff = p - block0;
+                    foundIndex = static_cast<int32_t>(byteOff / 2);
+                    break;
+                }
+
+                uint32_t consumed = 2 + static_cast<uint32_t>(wide ? len * 2 : len);
+                if (consumed & 1) ++consumed;
+                p += consumed;
+                if (p - block0 >= 0x10000) break;   // 只走第一个 64 KiB 块
+            }
+        }
+    }
+
+    if (foundIndex < 0) {
+        emitLine("在名字池第一个块里没找到该名字 —— 换一个更常见的属性名试试");
+        return;
+    }
+    emitFmt("FName 索引 = {} (在名字池块 0 内定位到)", foundIndex);
+    // 自检: 用索引反查一次, 确认推出来的索引是对的。
+    emitFmt("反查该索引 -> \"{}\"", sanitize(eng_.names().resolve(foundIndex), 48));
+
+    // ---- 2) 扫 UClass 内存, 找存放该索引的位置 ----
+    // UClass 对象体不大(几 KB), 扫 0x100..0x2000 足够覆盖属性表区域。
+    emitLine("");
+    emitLine("在 UClass 里搜该 FName 索引:");
+    emitLine("      off     candidate          nearest-heap-ptr      looks-like-offset");
+    emitLine("      " + std::string(70, '-'));
+
+    int hits = 0;
+    for (uint32_t off = 0x100; off <= 0x2000 && hits < 12; off += 4) {
+        int32_t v = 0;
+        if (!safeRead(&v, reinterpret_cast<const void*>(cls + off), 4)) break;
+        if (v != foundIndex) continue;
+
+        ++hits;
+        // 命中处附近找一个指向堆的指针 —— FProperty 对象就在附近被引用。
+        uint64_t nearPtr = 0;
+        uint32_t nearOff = 0;
+        for (int d = -32; d <= 32; d += 8) {
+            const uint32_t probe = static_cast<uint32_t>(static_cast<int32_t>(off) + d);
+            uint64_t cand = 0;
+            if (!safeRead(&cand, reinterpret_cast<const void*>(cls + probe), 8)) continue;
+            if (cand < 0x10000 || cand > 0x7FFFFFFFFFFF) continue;
+            if (cand >= eng_.moduleBase() && cand < eng_.moduleBase() + eng_.moduleSize()) continue;
+            nearPtr = cand;
+            nearOff = probe;
+            break;
+        }
+
+        // 在那个候选对象上扫"像结构体偏移的小整数"(常见的类内字段偏移范围)。
+        int32_t likeOffset = 0;
+        if (nearPtr) {
+            for (uint32_t o = 0x30; o <= 0x50; o += 4) {
+                int32_t iv = 0;
+                if (!safeRead(&iv, reinterpret_cast<const void*>(nearPtr + o), 4)) continue;
+                if (iv > 0x40 && iv < 0x2000) { likeOffset = iv; break; }
+            }
+        }
+
+        emitFmt("      +{:#06x}  {:<16} {:<18} {}",
+                 off, hex(static_cast<uint64_t>(v), 8),
+                 nearPtr ? fmt("{}(+{:#x})", hex(nearPtr, 16), nearOff) : std::string("-"),
+                 likeOffset ? fmt("+{:#x}", likeOffset) : std::string("-"));
+    }
+
+    if (hits == 0) {
+        emitLine("      (没找到) —— 该属性名可能不在 UClass 对象体内, 或索引推导有偏");
+    } else {
+        emitLine("");
+        emitLine("=> 命中处即该属性的 FName 存放位置; 旁边的堆对象应为它的 FProperty,");
+        emitLine("   其中形如 +0xNNN 的小整数就是 Offset_Internal 的候选值。");
     }
 }
 

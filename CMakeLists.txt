@@ -103,6 +103,12 @@ add_library(epsilonPayload SHARED
     src/payload/feature/module/Module.cpp
     src/payload/feature/module/ModuleManager.cpp
     src/payload/feature/config/ConfigManager.cpp
+    src/payload/feature/GameContext.cpp
+    src/payload/feature/Modules.cpp
+    src/payload/feature/movement/MovementAccess.cpp
+    src/payload/feature/module/impl/Jump.cpp
+    src/payload/feature/module/impl/Speed.cpp
+    src/payload/feature/ui/FeaturePanel.cpp
 )
 target_include_directories(epsilonPayload PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/payload")
 # dxgi / d3d12 是必须的: 我们自己的代码走 GetProcAddress, 但 ImGui 的 DX12

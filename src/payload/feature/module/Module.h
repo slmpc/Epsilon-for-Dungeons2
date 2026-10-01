@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -140,6 +141,23 @@ public:
 
     // 按名字查设置(大小写不敏感)。找不到返回 nullptr。
     [[nodiscard]] Setting* findSetting(std::string_view name) const;
+
+    // 类型化查找。名字对但类型不符时返回 nullptr —— 这类错误应当表现为
+    // "拿不到设置"而不是在调用点硬转出一个错误的指针。
+    template <typename T>
+    [[nodiscard]] T* findSettingAs(std::string_view name) const {
+        return dynamic_cast<T*>(findSetting(name));
+    }
+
+    // 取一个已知存在设置的偏移: 找不到就抛逻辑错误。
+    // 用于"这些设置是本模块自己在构造函数里加的, 必须有"的场景 ——
+    // 那种情况下返回 nullptr 只会把错误推迟到运行期崩溃。
+    template <typename T>
+    [[nodiscard]] T& requireSetting(std::string_view name) const {
+        T* s = findSettingAs<T>(name);
+        if (!s) throw std::logic_error("模块 " + name_ + " 缺少设置: " + std::string(name));
+        return *s;
+    }
 
     SettingGroup& addGroup(std::string_view name);
 

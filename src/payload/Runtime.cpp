@@ -15,11 +15,16 @@
 #include "payload/Hooks.h"
 #include "payload/Payload.h"
 #include "payload/PipeClient.h"
+#include "payload/feature/GameContext.h"
+#include "payload/feature/Modules.h"
+#include "payload/feature/config/ConfigManager.h"
+#include "payload/feature/module/ModuleManager.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #  define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <process.h>     // _beginthreadex
 
 #include <atomic>
 #include <memory>
@@ -34,6 +39,64 @@ std::unique_ptr<CommandServer> gServer;
 std::atomic<bool> gReady{false};
 std::atomic<bool> gStopping{false};
 std::mutex gLifecycleMu;
+
+// 功能模块的驱动线程。
+//
+// 为什么单独一条线程, 而不是挂在 Present 帧钩子上:
+//   帧钩子在本项目里是**显式安装**的可选项, 而且其交换链探测在被注入的上下文中
+//   有已知崩溃风险(见 hooks.h)。功能模块不该依赖一个默认关闭、且有风险的机制
+//   才能工作。
+//
+// 为什么是 30 Hz 而不是每帧:
+//   这类模块改的是"手感的标量"(最大步速/跳跃初速度), 30 Hz 已经完全跟得上;
+//   再高只是徒增跨线程的内存读。真正的每帧精度留给将来的瞄准类功能 —— 那种
+//   应当走帧钩子。
+//
+// 线程安全: 线程只做"读游戏内存 + 写几个 float"。Module::onFrame 的实现都只
+// 碰自己的标量状态, 不与命令线程或渲染线程共享容器; 配置落盘也在本线程内串行
+// 完成(见下面的 saveIfDirty 调用)。
+constexpr DWORD featureTickIntervalMs = 33;
+constexpr DWORD configSaveIntervalMs  = 5000;
+
+HANDLE gFeatureThread = nullptr;
+
+unsigned long __stdcall featureTickTrampoline(void*) {
+    uint64_t lastSave = ::GetTickCount64();
+
+    while (!gStopping.load(std::memory_order_acquire)) {
+        // 推进一帧: 内部会(带节流地)重新解析玩家移动组件, 然后驱动各模块。
+        epsilon::feature::tickFrame();
+        epsilon::feature::ModuleManager::instance().onFrame();
+
+        const uint64_t now = ::GetTickCount64();
+        if (now - lastSave >= configSaveIntervalMs) {
+            lastSave = now;
+            // 只在真的有改动时才写盘 —— 避免每 5 秒无条件重写一遍配置文件,
+            // 那会让 SSD 上的配置文件目录一直在变, 也让"改了什么"难以追踪。
+            epsilon::feature::ConfigManager::instance().saveIfDirty();
+        }
+
+        ::Sleep(featureTickIntervalMs);
+    }
+    return 0;
+}
+
+void startFeatureThread() {
+    if (gFeatureThread) return;
+    // 与 PipeChannel 同样的理由: 线程里会用到 CRT(string/format/mutex), 必须
+    // _beginthreadex, 不能用 CreateThread。
+    uintptr_t t = _beginthreadex(
+        nullptr, 0,
+        reinterpret_cast<unsigned(__stdcall*)(void*)>(&featureTickTrampoline),
+        nullptr, 0, nullptr);
+    if (!t) {
+        logWarn(fmt("功能模块线程创建失败 errno={} —— 模块开关将不会自动生效",
+                    errno));
+        return;
+    }
+    ::SetThreadDescription(reinterpret_cast<HANDLE>(t), L"epsilon-feature-tick");
+    gFeatureThread = reinterpret_cast<HANDLE>(t);
+}
 
 uint64_t     gModuleBase = 0;
 uint64_t     gModuleSize = 0;
@@ -133,6 +196,25 @@ unsigned long __stdcall runtimeMain(void* /*param*/) {
         emit(gEngine->report());
     } else {
         logWarn("未能定位引擎 → 只能使用 rescan/status/help 等元命令");
+    }
+
+    // ---- 3.5) 功能模块 ----
+    // 注册 + 绑定引擎 + 起驱动线程。**即使引擎没就绪也要走这一步**:
+    // 玩家可能还没进关卡, 模块需要在那之后自己解析成功并生效 —— 这正是
+    // MovementAccess 的节流重试所服务的场景。
+    {
+        epsilon::feature::initModules();
+        epsilon::feature::bindEngine(gEngine.get());
+
+        // 配置: 读出上次保存的开关与设置。失败不致命 —— 模块会停在默认值。
+        auto& cfg = epsilon::feature::ConfigManager::instance();
+        if (cfg.initialize()) {
+            cfg.applyToModules();
+        } else {
+            logWarn(fmt("配置初始化失败, 模块使用默认值: {}", cfg.lastError()));
+        }
+
+        startFeatureThread();
     }
 
     // ---- 4) 帧钩子:**不自动安装** ----

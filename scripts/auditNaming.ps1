@@ -68,6 +68,9 @@ $allowed = @(
     # UE engine field names quoted in comments: they are the engine's own spelling,
     # not ours, so they must not be camel-cased.
     '^Offset_Internal$',
+    '^OnRep_', '^PlayerCharacter_C$', '^MovementSpeedMultiplier$',
+    # nlohmann 的 optional 访问器 / Win32 标志
+    '^has_value$', '^MOVEFILE_',
     # project-owned macros that intentionally keep SCREAMING_SNAKE_CASE
     '^EPSILON_PIPE_NAME$', '^EPSILON_TARGET_NO_CLEAR$', '^NOMINMAX$', '^_t$'
 )

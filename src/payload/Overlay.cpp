@@ -19,6 +19,8 @@
 #include "payload/Hooks.h"
 #include "payload/Payload.h"
 #include "payload/Runtime.h"
+#include "payload/feature/module/ModuleManager.h"
+#include "payload/feature/ui/FeaturePanel.h"
 #include "payload/ue/Engine.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -145,9 +147,32 @@ LRESULT WINAPI wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;                       // 吃掉, 别让游戏也响应这个键
         }
     }
+
+    // 改键捕获必须**早于**模块分发与游戏处理: 用户点了"改键"之后按下的那个键,
+    // 只应该被绑定, 不应该同时触发一次模块开关、也不应该漏进游戏。
+    // 面板不可见时不拦截, 否则一个隐藏的面板会把按键全部吃掉。
+    const bool isKey = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN ||
+                        msg == WM_KEYUP   || msg == WM_SYSKEYUP);
+    if (isKey && g.visible && feature::FeaturePanel::isCapturing()) {
+        const int vk = static_cast<int>(wp);
+        const bool pressed = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
+        if (feature::FeaturePanel::captureKey(vk, pressed)) return 0;
+    }
+
     if (g.visible && ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) {
         return 1;
     }
+
+    // 面板可见且 ImGui 正在接收键盘时, 不再把按键分发给模块 —— 否则在面板里
+    // 拖滑块/输入文本会顺手把模块开关切了。
+    if (isKey && g.visible && ImGui::GetIO().WantCaptureKeyboard) {
+        return ::CallWindowProcW(g.origWndproc, hwnd, msg, wp, lp);
+    }
+    if (isKey) {
+        const bool pressed = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
+        feature::ModuleManager::instance().dispatchKeyEvent(static_cast<int32_t>(wp), pressed);
+    }
+
     return ::CallWindowProcW(g.origWndproc, hwnd, msg, wp, lp);
 }
 
@@ -481,6 +506,10 @@ void drawUi() {
             }
             if (ImGui::BeginTabItem("Objects")) {
                 panelObjects();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Modules")) {
+                feature::FeaturePanel::draw();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("About")) {

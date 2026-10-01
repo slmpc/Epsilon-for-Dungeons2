@@ -329,6 +329,11 @@ bool ConfigManager::reload() {
     return true;
 }
 
+void ConfigManager::applyToModules() {
+    std::lock_guard lk(mu_);
+    loadActiveLocked();
+}
+
 // 遍历当前配置的 modules 目录, 逐个交给对应模块反序列化。
 void ConfigManager::loadActiveLocked() {
     auto& mgr = ModuleManager::instance();

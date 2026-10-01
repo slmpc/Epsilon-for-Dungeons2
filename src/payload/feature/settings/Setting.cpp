@@ -238,7 +238,9 @@ void KeybindSetting::readFrom(nlohmann::json const& in) {
 }
 
 std::string KeybindSetting::keyName(int32_t vk) {
-    if (vk < 0) return "未绑定";
+    // ⚠️ 返回值会直接画在游戏内的 ImGui 面板上, 所以必须保持纯 ASCII ——
+    // 内置位图字体没有中文字形, 中文会渲染成 '?'(实测踩过)。
+    if (vk < 0) return "unbound";
 
     // 常见键给可读名。完整的 VK 表有 200 多项, 全列出来收益很低 ——
     // 未覆盖的落到最后的十六进制兜底, 仍然可用于人工对表。
@@ -273,7 +275,7 @@ std::string KeybindSetting::keyName(int32_t vk) {
     if (vk >= 0x41 && vk <= 0x5A) return std::string(1, static_cast<char>('A' + (vk - 0x41)));
     if (vk >= 0x60 && vk <= 0x69) return "Num" + std::to_string(vk - 0x60);
     if (vk >= 0x70 && vk <= 0x87) return "F" + std::to_string(vk - 0x6F);
-    return std::format("未知键(0x{:X})", vk);
+    return std::format("key(0x{:X})", vk);
 }
 
 // ===========================================================================
@@ -297,7 +299,8 @@ EnumSetting::EnumSetting(std::string_view name,
 }
 
 std::string const& EnumSetting::value() const {
-    static const std::string unknown{"<非法>"};
+    // ASCII: 见 keyName 的说明 —— 这个值会显示在面板上。
+    static const std::string unknown{"<invalid>"};
     if (index_ < 0 || static_cast<size_t>(index_) >= choices_.size()) return unknown;
     return choices_[static_cast<size_t>(index_)];
 }

@@ -342,6 +342,10 @@ Hooks& hooks() {
 Hooks::~Hooks() = default;
 
 bool Hooks::install() {
+    // 加锁: install() 可能来自命令线程(`hook` 命令)与功能线程(自动安装)。
+    // 两个线程同时走 MH_CreateHook 会把 MinHook 的内部状态搅坏。
+    std::lock_guard lk(installMu_);
+
     if (status_.installed) return true;
     status_.attempted = true;
 

@@ -53,6 +53,14 @@ private:
     // ---- 世界 ----
     void cmdWorld();
     void cmdActors(std::vector<std::string> const& args);
+    // 诊断: 找出关卡里的"玩家候选", 并说明功能模块会挑中哪一个。
+    // 存在的意义: 功能模块按类名匹配玩家, 一旦类名假设错了, 表现只是
+    // "开了没反应", 极难定位。这条命令把类名实情直接摊开。
+    void cmdPlayer();
+
+    // 属性链读空时的取证: 把 UStruct 对象里各个"可能是属性链起点"的指针槽
+    // 全 dump 出来, 并标注它指向的位置能否解出合法的 FField 名字。
+    void dumpStructPointerSlots(uint64_t structObj);
 
     // ---- 帧钩子 ----
     void cmdHooks();          // 显示状态

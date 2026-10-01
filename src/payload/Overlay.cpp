@@ -280,20 +280,62 @@ bool createResources(IDXGISwapChain* sc) {
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     g.srv.cpuBase = g.srv.heap->GetCPUDescriptorHandleForHeapStart();
     g.srv.gpuBase = g.srv.heap->GetGPUDescriptorHandleForHeapStart();
+    return true;
+}
 
-    // 给每个后缓冲建 RTV
-    {
-        D3D12_CPU_DESCRIPTOR_HANDLE h = g.rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        for (UINT i = 0; i < g.backbufferCount; ++i) {
-            ID3D12Resource* bb = nullptr;
-            if (SUCCEEDED(sc->GetBuffer(i, IID_PPV_ARGS(&bb))) && bb) {
-                g.device->CreateRenderTargetView(bb, nullptr, h);
-                bb->Release();
-            }
-            h.ptr += g.rtvInc;
+// 仅为后缓冲建 RTV 描述符。与设备/SRV 堆等"与尺寸无关"的资源分开,
+// 这样交换链重建时只需要跑这一部分。
+bool createBackBufferViews(IDXGISwapChain* sc) {
+    if (!g.device || !g.rtvHeap) { g.error = "RTV 堆不存在"; return false; }
+
+    D3D12_CPU_DESCRIPTOR_HANDLE h = g.rtvHeap->GetCPUDescriptorHandleForHeapStart();
+    for (UINT i = 0; i < g.backbufferCount; ++i) {
+        ID3D12Resource* bb = nullptr;
+        if (SUCCEEDED(sc->GetBuffer(i, IID_PPV_ARGS(&bb))) && bb) {
+            g.device->CreateRenderTargetView(bb, nullptr, h);
+            // 后缓冲由交换链持有, 这里只是借用 —— 必须立刻 Release,
+            // 否则交换链 ResizeBuffers 会因为引用计数不为 0 而失败。
+            bb->Release();
+        } else {
+            g.error = fmt("GetBuffer({}) 失败", i);
+            return false;
         }
+        h.ptr += g.rtvInc;
     }
     return true;
+}
+
+// 释放与交换链尺寸绑定的资源。设备/队列/分配器/围栏/SRV 堆都保留 ——
+// 它们在 ResizeBuffers 前后依然有效, 重建它们纯属浪费且容易出错。
+void releaseSizeDependent() {
+    if (g.rtvHeap) { g.rtvHeap->Release(); g.rtvHeap = nullptr; }
+}
+
+// 交换链尺寸或后缓冲数量变化时, 重建与尺寸绑定的那一小部分。
+bool rebuildForSwapchain(IDXGISwapChain* sc, UINT newCount, UINT newW, UINT newH) {
+    if (!g.device) return false;
+
+    // 1) 等自己的队列跑完。不等的话, GPU 可能还在读我们即将重建的那些资源。
+    waitGpu();
+
+    // 2) 丢掉旧的 RTV 堆。注意**不碰** ImGui 的 SRV 堆: 字体纹理与 ImGui
+    //    后端状态跟交换链尺寸无关, 重建它们只会引入新的失败点。
+    releaseSizeDependent();
+
+    g.backbufferCount = newCount;
+    g.width = newW;
+    g.height = newH;
+
+    D3D12_DESCRIPTOR_HEAP_DESC rh{};
+    rh.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    rh.NumDescriptors = g.backbufferCount;
+    rh.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+    if (FAILED(g.device->CreateDescriptorHeap(&rh, IID_PPV_ARGS(&g.rtvHeap)))) {
+        g.error = "RTV 堆重建失败";
+        return false;
+    }
+    g.rtvInc = g.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    return createBackBufferViews(sc);
 }
 
 // ImGui 初始化
@@ -552,6 +594,7 @@ bool init(IDXGISwapChain* swapchain) {
     trace("  [overlay] 首次 Present, 开始初始化 ImGui...");
 
     bool ok = createResources(swapchain);
+    if (ok) ok = createBackBufferViews(swapchain);
     if (ok) ok = createImGui(swapchain);
 
     if (ok) {
@@ -569,8 +612,61 @@ bool init(IDXGISwapChain* swapchain) {
     return ok;
 }
 
+// 交换链尺寸/后缓冲数量是否与我们已经建好的资源一致。
+//
+// ⚠️ 这是 D3D12 覆盖层最经典的一处致命疏漏, 本项目的真机崩溃就是它:
+//   窗口改尺寸、切全屏、改分辨率都会让 DXGI **重建后缓冲**。此时旧的
+//   ID3D12Resource* 全部作废, 而我们缓存着按旧数量建的 RTV 堆 —— 继续拿
+//   旧 RTV 去 OMSetRenderTargets 就等于把"已经不存在的后缓冲"绑成渲染目标。
+//   D3D12 不会在 CPU 侧报错(命令照常记录、提交也成功), 但 GPU 侧会挂死,
+//   表现为 UE 弹出 "GPU Crash dump Triggered" 并留下 .nv-gpudmp ——
+//   日志里一切正常, 完全看不出问题在哪。
+bool needsRebuild(IDXGISwapChain* swapchain, UINT& outCount, UINT& outW, UINT& outH) {
+    DXGI_SWAP_CHAIN_DESC desc{};
+    if (FAILED(swapchain->GetDesc(&desc))) return false;
+
+    outCount = desc.BufferCount ? desc.BufferCount : 2;
+    outW = desc.BufferDesc.Width;
+    outH = desc.BufferDesc.Height;
+    if (outW == 0 || outH == 0) {
+        // 有些情况 GetDesc 不给尺寸(比如刚 ResizeBuffers 过), 退回窗口客户区。
+        RECT rc{};
+        if (::GetClientRect(g.hwnd, &rc)) {
+            outW = static_cast<UINT>(rc.right - rc.left);
+            outH = static_cast<UINT>(rc.bottom - rc.top);
+        }
+    }
+    if (outW == 0 || outH == 0) return false;   // 拿不到就别动, 免得越修越坏
+
+    if (outCount == g.backbufferCount && outW == g.width && outH == g.height) return false;
+    return true;
+}
+
 void render(IDXGISwapChain* swapchain) {
     if (!g.initialized || !swapchain) return;
+
+    // ---- 尺寸变化检测 ----
+    // 必须在**取后缓冲之前**做: 一旦尺寸变了, 后面的 RTV/视口/裁剪全是错的。
+    {
+        UINT newCount = 0, newW = 0, newH = 0;
+        if (needsRebuild(swapchain, newCount, newW, newH)) {
+            trace(fmt("  [overlay] 交换链变化: {}x{} x{} -> {}x{} x{} , 重建资源",
+                      g.width, g.height, g.backbufferCount, newW, newH, newCount));
+
+            std::lock_guard lk(gMu);
+            // 只重建与尺寸绑定的一小部分: RTV 堆 + 每个后缓冲的 RTV。
+            // 设备/队列/分配器/围栏/SRV 堆与尺寸无关, 一律保留。
+            if (!rebuildForSwapchain(swapchain, newCount, newW, newH)) {
+                // 重建失败: 标记为未初始化, 让上层下一帧重新走 init。
+                // 比继续用半套资源去渲染安全得多。
+                g.initialized = false;
+                trace(fmt("  [overlay] 重建失败, 暂停渲染: {}", g.error));
+                return;
+            }
+            trace(fmt("  [overlay] 重建完成 ({}x{}, {} 个后缓冲)",
+                      g.width, g.height, g.backbufferCount));
+        }
+    }
 
     // 帧率统计
     {

@@ -43,6 +43,17 @@ bool looksLikeLocalPlayer(std::string_view className) {
     return icontains(className, "PlayerCharacter") || icontains(className, "PlayerPawn");
 }
 
+// ---- 诊断文案: 一律纯 ASCII ----
+//
+// ⚠️ 这些字符串会被 Overlay 面板直接显示, 而游戏进程内的 ImGui 只有内置
+// ASCII 位图字形 —— 中文会渲染成一串 '?', 等于没有信息(实测踩过)。
+// 需要中文说明的地方放在 trace/logWarn 里, 那边是文件与管道, 不受字体限制。
+constexpr char errEngineNotReady[] =
+    "engine not ready (GObjects/GNames not located)";
+constexpr char errNoPlayer[] =
+    "no local player pawn in level actors (filter expects PlayerCharacter/PlayerPawn, "
+    "excluding Mock/Mob) - run the 'player' command to list candidates";
+
 } // namespace
 
 // ===========================================================================
@@ -75,7 +86,7 @@ bool PlayerMovement::resolve(Engine& engine, bool force) {
     lastError_.clear();
 
     if (!engine.ready()) {
-        lastError_ = "引擎未就绪(GObjects/GNames 未定位)";
+        lastError_ = errEngineNotReady;
         target_.resolved = false;
         nextResolveAtMs_ = now + retryIntervalMs;
         return false;
@@ -105,7 +116,7 @@ bool PlayerMovement::resolve(Engine& engine, bool force) {
 bool PlayerMovement::resolveTarget(Engine& engine) {
     const uint64_t pawn = findLocalPlayerPawn(engine);
     if (!pawn) {
-        lastError_ = "关卡里没找到本地玩家角色(未进关, 或只找到 Mock/Mob)";
+        lastError_ = errNoPlayer;
         target_ = {};
         return false;
     }
@@ -141,7 +152,7 @@ bool PlayerMovement::resolveTarget(Engine& engine) {
     }
 
     if (!movement) {
-        lastError_ = fmt("玩家 {} 上没找到 CharacterMovement 组件", target_.pawnClass);
+        lastError_ = fmt("no CharacterMovement component on pawn {}", target_.pawnClass);
         target_.resolved = false;
         return false;
     }
@@ -160,13 +171,14 @@ bool PlayerMovement::resolveTarget(Engine& engine) {
 // (实测有 UPlayerCharacterMovementComponent)。只问本类会一个都找不到。
 bool PlayerMovement::resolveOffsets(Engine& engine) {
     if (!target_.movementClass) {
-        lastError_ = "移动组件类指针为空";
+        lastError_ = "movement component UClass is null";
         return false;
     }
 
     const auto props = engine.reflection().allPropertiesInherited(target_.movementClass);
     if (props.empty()) {
-        lastError_ = fmt("{} 反射属性链读不出来(布局偏移可能已失效)",
+        lastError_ = fmt("reflection returned no properties for {} "
+                         "(UStruct layout offsets are stale - run 'props')",
                          target_.movementClassName);
         return false;
     }
@@ -196,7 +208,7 @@ bool PlayerMovement::resolveOffsets(Engine& engine) {
     offsets_ = o;
 
     if (!offsets_.hasCore()) {
-        lastError_ = fmt("{} 上没问出 MaxWalkSpeed/JumpZVelocity (拿到 {} 个属性)",
+        lastError_ = fmt("{}: no MaxWalkSpeed/JumpZVelocity among {} properties",
                          target_.movementClassName, props.size());
         return false;
     }

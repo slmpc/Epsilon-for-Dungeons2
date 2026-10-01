@@ -154,6 +154,7 @@ bool CommandServer::execute(std::string_view line) {
     else if (cmd == "set")                  { cmdSet(rest); }
     else if (cmd == "world" || cmd == "level") { cmdWorld(); }
     else if (cmd == "actors" || cmd == "list") { cmdActors(rest); }
+    else if (cmd == "player" || cmd == "pawn") { cmdPlayer(); }
     else if (cmd == "mem" || cmd == "dump")    { cmdMem(rest); }
     else if (cmd == "quit" || cmd == "exit" || cmd == "detach") {
         emitLine("bye");
@@ -328,6 +329,56 @@ void CommandServer::cmdClass(std::vector<std::string> const& args) {
 }
 
 // ---------------------------------------------------------------------------
+//  dumpStructPointerSlots — 属性链读空时的取证
+//
+//  UStruct 里"属性链起点"是个 8 字节指针。静态偏移一旦对这个构建失效,
+//  propertiesOf 就会返回空, 而空列表本身不含任何诊断信息。
+//
+//  这里把 0x20..0x98 每个 8 字节槽都读出来, 并对每个**像指针**的值试着按
+//  FField 解析一次名字(NamePrivate 在 FField+0x28, 是个 FName 索引)。
+//  哪个槽能解出合法名字, 哪个槽就极可能就是真正的属性链起点 —— 而且名字本身
+//  通常就直接告诉你它是什么(比如 "MaxWalkSpeed" 就是第一个属性)。
+// ---------------------------------------------------------------------------
+void CommandServer::dumpStructPointerSlots(uint64_t structObj) {
+    if (!structObj) return;
+
+    emitLine("    该类的指针槽扫描(找属性链起点):");
+    emitLine("      slot      value              resolves-to");
+    emitLine("      " + std::string(58, '-'));
+
+    const auto& layout = eng_.reflection().layout();
+    int plausible = 0;
+
+    for (uint32_t off = 0x20; off <= 0x98; off += 8) {
+        uint64_t v = 0;
+        if (!safeRead(&v, reinterpret_cast<const void*>(structObj + off), 8)) continue;
+        if (!v) continue;
+        // 只看像用户态指针的值, 过滤掉整数/标志位字段。
+        if (v < 0x10000 || v > 0x7FFFFFFFFFFF) continue;
+
+        std::string resolved;
+        // 试着把它当成 FField*, 读 NamePrivate。
+        int32_t nameIdx = 0;
+        if (safeRead(&nameIdx, reinterpret_cast<const void*>(v + layout.fieldName), 4)) {
+            resolved = eng_.names().resolve(nameIdx);
+        }
+        const bool good = !resolved.empty();
+        if (good) ++plausible;
+
+        emitFmt("      +{:#04x}     {:<18} {}{}",
+                 off, hex(v, 16), good ? "" : "(not a name) ",
+                 sanitize(resolved, 40));
+    }
+
+    if (plausible == 0) {
+        emitLine("      -> 没有任何槽像属性链起点。");
+        emitLine("         可能该类确实没有可反射属性, 或 FField::NamePrivate 偏移也变了。");
+    } else {
+        emitLine("      -> 有槽能解出名字候选(见上)。用 mem va=<该槽指向的地址> 进一步核对。");
+    }
+}
+
+// ---------------------------------------------------------------------------
 void CommandServer::cmdProps(std::vector<std::string> const& args) {
     if (!eng_.ready()) { emitLine("引擎未定位, 先执行 rescan"); return; }
     if (args.empty())   { emitLine("用法: props <类名> [inherited=1]"); return; }
@@ -341,6 +392,12 @@ void CommandServer::cmdProps(std::vector<std::string> const& args) {
     emitFmt("=== {} 的属性链 ===", eng_.objects().nameOf(cls));
     emitFmt("布局: Next=+{:#x} Name=+{:#x} Offset=+{:#x}",
              layout.fieldNext, layout.fieldName, layout.propOffset);
+    // 自愈探到的偏移要报出来 —— 一旦确认, 就该把它固化回 Reflection.h 的常量,
+    // 不必每次都靠扫描。
+    if (const uint32_t found = eng_.reflection().discoveredChildPropsOffset(); found != 0) {
+        emitFmt("属性链起点: 自愈探到 +{:#x} (静态常量是 +{:#x}) -> 建议固化",
+                 found, offStructChildProps);
+    }
     emitLine("");
 
     if (!inherited) {
@@ -363,6 +420,12 @@ void CommandServer::cmdProps(std::vector<std::string> const& args) {
         emitFmt("--- [{}] {}  ({} 个属性, {} 字节) ---",
                  depth - 1, eng_.objects().nameOf(cur), props.size(),
                  eng_.reflection().structSize(cur));
+        // 属性数为 0 时把候选指针槽全部 dump 出来。
+        // 属性数恒为 0 意味着 UStruct 里的"属性链起点"偏移对这个构建是错的;
+        // 光看空列表没法定位, 必须看到原始槽位才能确定真实偏移。
+        if (props.empty()) {
+            dumpStructPointerSlots(cur);
+        }
         for (auto const& pf : props) {
             emitFmt("  {:<34} {:<22} {:#8x} {:>7} {:>5}  {}",
                      sanitize(pf.name, 34), sanitize(pf.type, 22), pf.offset,
@@ -567,6 +630,87 @@ void CommandServer::cmdActors(std::vector<std::string> const& args) {
         if (++shown >= limit) break;
     }
     emitFmt("--- 显示 {} 条 ---", shown);
+}
+
+// ---------------------------------------------------------------------------
+//  player — 玩家候选诊断
+//
+//  功能模块(大跳/加速)靠类名匹配本地玩家, 匹配规则是否与**这个构建的实际
+//  类名**相符, 光看代码是看不出来的。这条命令把关卡里所有"长得像玩家"的
+//  Actor 全列出来, 并明确标出模块当前会挑中哪一个。
+//
+//  全部输出保持 ASCII: 覆盖层字体只有 ASCII 位图字形, 中文会渲染成 '?',
+//  而这条命令的结果很可能需要对着覆盖层看。
+// ---------------------------------------------------------------------------
+void CommandServer::cmdPlayer() {
+    // WorldView 与功能模块用的是同一条路径: 模块解析玩家也走这里。
+    WorldView view(eng_);
+
+    auto world = view.currentWorld();
+    if (!world) {
+        emitLine("no UWorld (not in a level yet?)");
+        return;
+    }
+
+    emitLine("=== player candidates ===");
+    emitFmt("world          : {} {}", hex(world->address, 16),
+            sanitize(world->className, 40));
+
+    auto level = view.persistentLevel();
+    if (!level) {
+        emitLine("PersistentLevel unavailable -- cannot enumerate actors");
+        return;
+    }
+    emitFmt("PersistentLevel: {} ({} actors)", hex(level->address, 16),
+            thousands(static_cast<uint64_t>(level->actorCount)));
+
+    const auto list = view.actors(*world);
+    if (list.empty()) {
+        emitLine("actor list is EMPTY -- the level's Actors array read failed");
+        emitLine("  (offset for ULevel::Actors may be wrong for this build)");
+        return;
+    }
+
+    // 统计出现的类名, 便于一眼看出关卡里到底有哪些角色类型。
+    int pawnish = 0;
+    int matched = 0;
+    size_t firstMatch = SIZE_MAX;
+
+    for (size_t i = 0; i < list.size(); ++i) {
+        const auto& a = list[i];
+        const bool looksLikePawn =
+            icontains(a.className, "Character") || icontains(a.className, "Pawn") ||
+            icontains(a.className, "Player");
+        if (!looksLikePawn) continue;
+
+        ++pawnish;
+        // 这里的判定必须与 feature/MovementAccess.cpp 的 looksLikeLocalPlayer 一致,
+        // 否则这条命令会骗人。
+        const bool accepted =
+            !icontains(a.className, "Mock") && !icontains(a.className, "Mob") &&
+            !icontains(a.className, "Projectile") &&
+            (icontains(a.className, "PlayerCharacter") || icontains(a.className, "PlayerPawn"));
+
+        if (accepted && firstMatch == SIZE_MAX) firstMatch = i;
+        if (accepted) ++matched;
+
+        emitFmt("  [{:>5}] {:>16}  {:<36} {}  {}",
+                 a.index, hex(a.address, 16), sanitize(a.className, 36),
+                 sanitize(a.name, 40), accepted ? "<== MODULE WILL USE THIS" : "");
+    }
+
+    emitLine("");
+    emitFmt("pawn-like actors : {}", pawnish);
+    emitFmt("module matches   : {}", matched);
+    if (matched == 0) {
+        emitLine("=> NO MATCH. The modules filter on the class name containing");
+        emitLine("   'PlayerCharacter' or 'PlayerPawn' while excluding Mock/Mob.");
+        emitLine("   Copy one of the class names above and tell me which one is you.");
+    } else if (firstMatch != SIZE_MAX) {
+        emitFmt("=> module would pick [{}] {} ({})",
+                list[firstMatch].index, sanitize(list[firstMatch].className, 36),
+                hex(list[firstMatch].address, 16));
+    }
 }
 
 } // namespace epsilon::payload

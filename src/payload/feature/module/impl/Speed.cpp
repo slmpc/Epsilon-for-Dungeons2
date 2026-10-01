@@ -35,17 +35,15 @@ uint64_t gLastWarnMs = 0;
 
 SpeedModule::SpeedModule()
     : Module("Speed", Category::player, "Movement speed multiplier") {
+    // 说明文案统一纯 ASCII, 理由同 JumpModule 的构造函数注释。
     auto& s = addEnum("ApplyTo", {sinkGameMultiplier, sinkMaxWalkSpeed}, sinkGameMultiplier,
-                      "改哪个字段; SpeedMultiplier 是游戏自己的复制倍率, 优先");
-    s.setDescription("Which field to scale (SpeedMultiplier is the game's own)");
+                      "Which field to scale (SpeedMultiplier is the game's own)");
     sink_ = &s;
 
-    auto& m = addDouble("Multiplier", 1.8, 0.1, maxMultiplier, 0.1, "速度倍数");
-    m.setDescription("Speed multiplier");
+    auto& m = addDouble("Multiplier", 1.8, 0.1, maxMultiplier, 0.1, "Speed multiplier");
     multiplier_ = &m;
 
-    auto& n = addBool("Notify", false, "启用时打印一次解析结果");
-    n.setDescription("Print resolution details once on enable");
+    auto& n = addBool("Notify", false, "Print resolution details once on enable");
     notify_ = &n;
 
     setHidden(false);

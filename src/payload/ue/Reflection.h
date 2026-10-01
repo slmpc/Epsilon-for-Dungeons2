@@ -96,12 +96,18 @@ public:
     // 需要适配别的引擎版本时, 在这里整体替换布局常量。
     void setLayout(ReflectionLayout const& l) { layout_ = l; }
 
+    // 自愈探到的"属性链起点"偏移。0 = 仍在使用静态常量 offStructChildProps。
+    // 供 status/props 输出, 便于把实测值固化回代码。
+    [[nodiscard]] uint32_t discoveredChildPropsOffset() const noexcept;
+
 private:
     [[nodiscard]] std::string fieldName(uint64_t field) const;
     [[nodiscard]] std::vector<PropertyField> walk(uint64_t firstField, size_t limit) const;
 
     NamePool const*  names_ = nullptr;
     ReflectionLayout layout_{};
+    // mutable: propertiesOf 是 const 的, 但自愈过程要在里面记录探到的偏移。
+    mutable uint32_t lastChildPropsOffset_ = 0;
 };
 
 } // namespace epsilon::ue

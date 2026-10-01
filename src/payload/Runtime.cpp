@@ -27,6 +27,7 @@
 #include <process.h>     // _beginthreadex
 
 #include <atomic>
+#include <cstdlib>   // atoi
 #include <memory>
 #include <mutex>
 #include <string>
@@ -60,13 +61,88 @@ constexpr DWORD configSaveIntervalMs  = 5000;
 
 HANDLE gFeatureThread = nullptr;
 
+// Present 钩子自动安装的状态。只试一次 —— 理由见 maybeAutoInstallHook。
+bool gAutoHookDone = false;
+
+// 前向声明: 定义在 featureTickTrampoline 之后, 但被它调用。
+void maybeAutoInstallHook();
+
+// 读取自动安装开关。EPSILON_NO_AUTO_HOOK=1 可关闭。
+//
+// 为什么用环境变量而不是配置文件:
+//   如果这个钩子导致游戏崩溃, 用户需要一条**在游戏之外**就能生效的关闭途径。
+//   配置文件也能改, 但环境变量更直接 —— 在启动器/批处理里设一次即可, 不必先
+//   找到配置目录、也不必让游戏成功启动过一次。
+bool autoHookAllowed() {
+    char buf[8]{};
+    if (::GetEnvironmentVariableA("EPSILON_NO_AUTO_HOOK", buf, sizeof(buf)) > 0) {
+        const int v = ::atoi(buf);
+        // 只有明确写了非 0 才关闭; 设成 "0" 视为不关闭(便于脚本里条件设置)。
+        if (v != 0) return false;
+    }
+    return true;
+}
+
+// 自动安装 Present 钩子。**每帧都调用**, 内部自己决定要不要真动手。
+//
+// 之前的版本用一个"下次尝试时间戳"做门控, 结果把自己的重试逻辑绕进了死胡同
+// (门控值与线程推进时机对不上, 表现为"启用了但从不尝试")。现在改成最简单的
+// 形态: 第一次调用就把该做的做完 —— 延迟不是一个有用的保护, 反而是一个
+// 容易出错的额外状态。
+void maybeAutoInstallHook() {
+    if (gAutoHookDone) return;
+    if (hooks().installed()) { gAutoHookDone = true; return; }
+
+    // 只试一次。不重试的理由: 如果这条路径会崩, 反复踩只是多冒几次把目标
+    // 带走的险; 如果它失败但不崩, 命令 `hook` 随时可以手工再试。
+    gAutoHookDone = true;
+
+    if (!autoHookAllowed()) {
+        trace("Present 钩子自动安装已由 EPSILON_NO_AUTO_HOOK 关闭");
+        return;
+    }
+
+    trace("Present 钩子自动安装(默认行为); 如需关闭请设 EPSILON_NO_AUTO_HOOK=1");
+
+    // 注意: 这一步内部会走 findPresent(临时 D3D12 交换链取 vtable)。
+    // 放在功能线程而非启动路径上: 万一它把目标带走, 至少管道已连、日志已落盘,
+    // "最后一次尝试"有明确记录。命令采集与功能模块都不依赖帧钩子。
+    if (installFrameHook()) {
+        trace("Present 钩子自动安装成功");
+        return;
+    }
+    trace(fmt("Present 钩子自动安装失败: {}", hooks().status().error));
+    trace("  覆盖层不可用; 命令采集与功能模块不受影响。可手工执行 `hook` 重试。");
+}
+
 unsigned long __stdcall featureTickTrampoline(void*) {
     uint64_t lastSave = ::GetTickCount64();
 
+    // 这个线程是静默的, 没有这条记录就完全看不出它到底有没有起来。
+    trace("功能线程已启动(模块 tick + Present 自动安装)");
+
+    uint64_t loopCount = 0;
     while (!gStopping.load(std::memory_order_acquire)) {
+        // 心跳: 这个线程平时是静默的, 每 ~5 秒留一行便于确认它还活着。
+        //
+        // 这条心跳还有个实际用途: 自动安装 Present 钩子调用 findPresent 时会
+        // 建临时 D3D12 交换链。在**没有 D3D12 的目标**上(比如自测靶子)这一步
+        // 可能长时间不返回 —— 心跳停了就等于告诉你卡在那里了。
+        if (++loopCount % 150 == 0) {
+            trace(fmt("功能线程心跳 loop={}", loopCount));
+        }
+
         // 推进一帧: 内部会(带节流地)重新解析玩家移动组件, 然后驱动各模块。
         epsilon::feature::tickFrame();
         epsilon::feature::ModuleManager::instance().onFrame();
+        // 推进一帧: 内部会(带节流地)重新解析玩家移动组件, 然后驱动各模块。
+        epsilon::feature::tickFrame();
+        epsilon::feature::ModuleManager::instance().onFrame();
+
+        // ---------------- Present 钩子自动安装 ----------------
+        // 默认开启(用户要求), 放在**功能线程里**而不是 runtimeMain 的启动路径上。
+        // 万一 findPresent 把目标带走, 至少管道已连、日志已落盘, 有迹可循。
+        maybeAutoInstallHook();
 
         const uint64_t now = ::GetTickCount64();
         if (now - lastSave >= configSaveIntervalMs) {

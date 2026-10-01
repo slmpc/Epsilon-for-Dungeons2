@@ -94,10 +94,64 @@ std::vector<PropertyField> Reflection::walk(uint64_t firstField, size_t limit) c
 
 std::vector<PropertyField> Reflection::propertiesOf(uint64_t structObj) const {
     if (!ready() || !structObj) return {};
+
+    // 已经探到过真实偏移就直接用。这一步很重要: 自愈扫描要试 13 个候选槽,
+    // 每次 propertiesOf 都跑一遍的话, 枚举 Actor(几十次调用)会明显变慢。
+    if (lastChildPropsOffset_ != 0) {
+        uint64_t cached = 0;
+        if (safeRead(&cached, reinterpret_cast<const void*>(structObj + lastChildPropsOffset_), 8)) {
+            auto got = walk(cached, kMaxChain);
+            if (!got.empty()) return got;
+        }
+        // 缓存偏移读不出来就退回重新探测(下次仍会缓存)。
+    }
+
     uint64_t first = 0;
-    if (!safeRead(&first, reinterpret_cast<const void*>(structObj + offStructChildProps), 8))
-        return {};
-    return walk(first, kMaxChain);
+    if (safeRead(&first, reinterpret_cast<const void*>(structObj + offStructChildProps), 8)) {
+        auto got = walk(first, kMaxChain);
+        if (!got.empty()) return got;
+    }
+
+    // ---- 自愈: 静态偏移失效时现场找回属性链 ----
+    //
+    // 为什么需要这一步: UStruct 各字段的偏移是**每个引擎版本都可能变**的。
+    // 实测这个构建上报的类大小/继承链都对, 但属性数恒为 0 —— 也就是
+    // SuperStruct 偏移是对的, 但属性链起点偏移不对(注意本构建里
+    // SuperStruct / ChildProperties 这两个反射名都不在字符串表里,
+    // 说明 UStruct 的布局与常见 UE5 版本不同)。
+    //
+    // 属性链起点是 UStruct 里某个 8 字节指针, 它指向的 FField 必然有一个能
+    // 解析出非空名字的 NamePrivate。于是可以按"指针 + 该处能读出合法名字 +
+    // 走出来的链里有 *Property 类型"来确认候选偏移 —— 比继续猜常量可靠,
+    // 而且下次游戏更新后也能自己找回。
+    for (uint32_t probe = 0x20; probe <= 0x98; probe += 8) {
+        if (probe == offStructChildProps) continue;      // 上面试过了
+        uint64_t cand = 0;
+        if (!safeRead(&cand, reinterpret_cast<const void*>(structObj + probe), 8)) continue;
+        if (!cand) continue;
+        // 先只看第一个字段能不能解出名字, 便宜且足够筛掉绝大多数候选。
+        int32_t nameIdx = 0;
+        if (!safeRead(&nameIdx, reinterpret_cast<const void*>(cand + layout_.fieldName), 4)) continue;
+        if (names_->resolve(nameIdx).empty()) continue;
+
+        auto probeChain = walk(cand, kMaxChain);
+        if (probeChain.empty()) continue;
+        // 再按类型名筛一层: FProperty 链里应当出现 *Property 类型名。
+        size_t propertyLike = 0;
+        for (auto const& p : probeChain) {
+            if (icontains(p.type, "Property")) ++propertyLike;
+        }
+        if (propertyLike == 0) continue;
+
+        lastChildPropsOffset_ = probe;
+        return probeChain;
+    }
+    return {};
+}
+
+// 上一次自愈找出的属性链偏移。0 表示仍在用静态偏移。
+uint32_t Reflection::discoveredChildPropsOffset() const noexcept {
+    return lastChildPropsOffset_;
 }
 
 std::optional<PropertyField> Reflection::findProperty(uint64_t structObj,

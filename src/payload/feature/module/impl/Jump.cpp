@@ -31,13 +31,13 @@ uint64_t gLastWarnMs = 0;
 
 JumpModule::JumpModule()
     : Module("Jump", Category::player, "Jump height multiplier (JumpZVelocity scaling)") {
+    // 说明文案统一纯 ASCII: 它们会作为 tooltip 画在游戏内的 ImGui 面板上,
+    // 而内置位图字体没有中文字形。详见 MovementAccess.cpp 的同类说明。
     auto& m = addDouble("Multiplier", 2.5, 0.5, maxMultiplier, 0.1,
-                        "JumpZVelocity 倍数; 高度约等于倍率的平方");
-    m.setDescription("Jump height multiplier (height ~ multiplier^2)");
+                        "JumpZVelocity multiplier (height ~= multiplier^2)");
     multiplier_ = &m;
 
-    auto& t = addBool("Notify", false, "启用时在通知区打印一次解析结果");
-    t.setDescription("Print resolution details once on enable");
+    auto& t = addBool("Notify", false, "Print resolution details once on enable");
     logOnce_ = &t;
 
     setHidden(false);

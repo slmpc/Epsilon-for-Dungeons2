@@ -96,6 +96,10 @@ public:
     // 诊断: 上一次解析失败的原因。
     [[nodiscard]] std::string const& lastError() const noexcept { return lastError_; }
 
+    // 偏移的来源("反射" 或 "静态表(...)")。供 UI/日志显示, 便于判断当前用的是
+    // 运行时反射还是从二进制读出的已知偏移。
+    [[nodiscard]] std::string const& offsetSource() const noexcept { return offsetSource_; }
+
 private:
     bool resolveOffsets(ue::Engine& engine);
     bool resolveTarget(ue::Engine& engine);
@@ -104,6 +108,7 @@ private:
     MovementTarget  target_{};
     MovementOffsets offsets_{};
     std::string     lastError_;
+    std::string     offsetSource_;
     uint64_t        nextResolveAtMs_ = 0;
 };
 

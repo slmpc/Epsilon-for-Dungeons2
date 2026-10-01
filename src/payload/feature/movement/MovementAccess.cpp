@@ -76,6 +76,61 @@ int playerRankFor(std::string_view className) {
     return -1;
 }
 
+// ---- 已知属性偏移: UCharacterMovementComponent ----
+//
+// 来源不是猜的, 是从二进制的**代码生成属性表**里读出来的。
+// UE 的 UHT 会为每个类的属性生成一份参数表(FPropertyParams), 其中
+// STRUCT_OFFSET(Class, Property) 是编译期常量。在 Shipping 构建里这张表位于
+// .rdata, 形如 [flags][ArrayDim][Offset][NameUTF8 指针], 所以偏移可以直接读出来。
+//
+// 实测(IDA, Dungeons-Win64-Shipping.exe @0x14973xxxx 区段):
+//     MaxStepHeight        +0x1a0
+//     JumpZVelocity        +0x1a4     <- Jump 模块用
+//     WalkableFloorAngle   +0x1ac
+//     GravityScale         +0x1c0
+//     GravityDirection     +0x1d0
+//     MaxWalkSpeed         +0x234     <- Speed 模块用
+//     MaxWalkSpeedCrouched +0x278
+//     MaxSwimSpeed         +0x27c
+//     MaxFlySpeed          +0x280
+//     MaxAcceleration      +0x288
+//     BrakingDecelerationWalking +0x29c
+//     AirControl           +0x2ac
+//     Mass                 +0x2fc
+//
+// 为什么这些偏移可以直接用: 这几个属性都定义在 UCharacterMovementComponent 上,
+// 而玩家用的是它的**子类**链路
+//     PlayerCharacterMovementComponent
+//       -> GASCharacterMovementComponent
+//         -> SWMovementComponent
+//           -> CharacterMovementComponent
+// 基类字段在子类里的偏移不会变, 所以父类的偏移直接可用。
+// (类大小实测: CharacterMovementComponent = 4048 字节, 上面最大的 0x2fc 远小于它。)
+struct KnownOffset { std::string_view name; int32_t offset; };
+
+constexpr KnownOffset knownMovementOffsets[] = {
+    {"MaxStepHeight",        0x1a0},
+    {"JumpZVelocity",        0x1a4},
+    {"WalkableFloorAngle",   0x1ac},
+    {"GravityScale",         0x1c0},
+    {"GravityDirection",     0x1d0},
+    {"MaxWalkSpeed",         0x234},
+    {"MaxWalkSpeedCrouched", 0x278},
+    {"MaxSwimSpeed",         0x27c},
+    {"MaxFlySpeed",          0x280},
+    {"MaxAcceleration",      0x288},
+    {"BrakingDecelerationWalking", 0x29c},
+    {"AirControl",           0x2ac},
+    {"Mass",                 0x2fc},
+};
+
+int32_t knownOffsetFor(std::string_view name) {
+    for (auto const& k : knownMovementOffsets) {
+        if (k.name == name) return k.offset;
+    }
+    return 0;
+}
+
 // ---- 诊断文案: 一律纯 ASCII ----
 //
 // ⚠️ 这些字符串会被 Overlay 面板直接显示, 而游戏进程内的 ImGui 只有内置
@@ -197,52 +252,69 @@ bool PlayerMovement::resolveTarget(Engine& engine) {
     return true;
 }
 
-// 用反射把移动组件上那几个属性的偏移问出来。
+// 取移动组件上那几个属性的偏移。
 //
-// 注意用 allPropertiesInherited: MaxWalkSpeed / JumpZVelocity / GravityScale 都
-// 定义在 UCharacterMovementComponent(基类)上, 而运行时拿到的是游戏自己的子类
-// (实测有 UPlayerCharacterMovementComponent)。只问本类会一个都找不到。
+// 两条来源, 按优先级:
+//   1. 运行时反射(若这个构建的 UStruct 布局可解) —— 能自动适配游戏更新
+//   2. 静态已知偏移表(见文件上方 knownMovementOffsets) —— 从代码生成属性表读出
+//
+// 实测这个构建的反射**不可用**(UStruct 布局被改过, 属性链三种判据都遍历不出来),
+// 所以第 2 条是实际生效的路径。它不是"猜的经验值", 而是从二进制里读出来的
+// 编译期常量, 与反射得到的结果等价。
 bool PlayerMovement::resolveOffsets(Engine& engine) {
     if (!target_.movementClass) {
         lastError_ = "movement component UClass is null";
         return false;
     }
 
-    const auto props = engine.reflection().allPropertiesInherited(target_.movementClass);
-    if (props.empty()) {
-        lastError_ = fmt("reflection returned no properties for {} "
-                         "(UStruct layout offsets are stale - run 'props')",
-                         target_.movementClassName);
-        return false;
+    // ---- 1) 先试反射 ----
+    MovementOffsets o;
+    size_t reflected = 0;
+    {
+        const auto props = engine.reflection().allPropertiesInherited(target_.movementClass);
+        // 按名字取偏移。同名属性在继承链上可能重复(FloatProperty 才是我们要的),
+        // 所以只接受 FloatProperty, 避免撞上同名的 bool/int 属性。
+        auto pickFloat = [&](std::string_view name) -> int32_t {
+            for (auto const& p : props) {
+                if (p.name == name && icontains(p.type, "FloatProperty") && p.offset > 0) {
+                    return p.offset;
+                }
+            }
+            return 0;
+        };
+        o.maxWalkSpeed    = pickFloat("MaxWalkSpeed");
+        o.jumpZVelocity   = pickFloat("JumpZVelocity");
+        o.gravityScale    = pickFloat("GravityScale");
+        o.airControl      = pickFloat("AirControl");
+        o.maxAcceleration = pickFloat("MaxAcceleration");
+        o.speedMultiplier = pickFloat("MovementSpeedMultiplier");
+        if (!o.speedMultiplier) o.speedMultiplier = pickFloat("SpeedMultiplier");
+        reflected = props.size();
     }
 
-    // 按名字取偏移。同名属性在继承链上可能重复(FloatProperty 才是我们要的),
-    // 所以只接受 FloatProperty, 避免撞上同名的 bool/int 属性。
-    auto pickFloat = [&](std::string_view name) -> int32_t {
-        for (auto const& p : props) {
-            if (p.name == name && icontains(p.type, "FloatProperty") && p.offset > 0) {
-                return p.offset;
-            }
-        }
-        return 0;
+    // ---- 2) 反射拿不到的, 用已知偏移表补齐 ----
+    int fromTable = 0;
+    auto fill = [&](int32_t& slot, std::string_view name) {
+        if (slot != 0) return;
+        const int32_t k = knownOffsetFor(name);
+        if (k != 0) { slot = k; ++fromTable; }
     };
-
-    MovementOffsets o;
-    o.maxWalkSpeed    = pickFloat("MaxWalkSpeed");
-    o.jumpZVelocity   = pickFloat("JumpZVelocity");
-    o.gravityScale    = pickFloat("GravityScale");
-    o.airControl      = pickFloat("AirControl");
-    o.maxAcceleration = pickFloat("MaxAcceleration");
-    // 游戏自己的速度倍率。实测该组件上有 MovementSpeedMultiplier +
-    // OnRep_MovementSpeedMultiplier, 说明它是被复制的权威字段。有就优先用。
-    o.speedMultiplier = pickFloat("MovementSpeedMultiplier");
-    if (!o.speedMultiplier) o.speedMultiplier = pickFloat("SpeedMultiplier");
+    fill(o.maxWalkSpeed,    "MaxWalkSpeed");
+    fill(o.jumpZVelocity,   "JumpZVelocity");
+    fill(o.gravityScale,    "GravityScale");
+    fill(o.airControl,      "AirControl");
+    fill(o.maxAcceleration, "MaxAcceleration");
+    // MovementSpeedMultiplier 不在已知表里(它不属于 UCharacterMovementComponent,
+    // 实测其参数项算出的偏移小于基类大小, 判定为其它类的属性, 不可采信)。
+    // Speed 模块因此固定作用在 MaxWalkSpeed 上。
 
     offsets_ = o;
+    offsetSource_ = fromTable ? fmt("静态表(反射得到 {} 个属性)", reflected)
+                              : std::string("反射");
 
     if (!offsets_.hasCore()) {
-        lastError_ = fmt("{}: no MaxWalkSpeed/JumpZVelocity among {} properties",
-                         target_.movementClassName, props.size());
+        lastError_ = fmt("{}: 反射+静态表都没能给出 MaxWalkSpeed/JumpZVelocity (反射 {} 个属性)",
+                         target_.movementClassName, reflected);
         return false;
     }
     return true;

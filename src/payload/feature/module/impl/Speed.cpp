@@ -36,8 +36,14 @@ uint64_t gLastWarnMs = 0;
 SpeedModule::SpeedModule()
     : Module("Speed", Category::player, "Movement speed multiplier") {
     // 说明文案统一纯 ASCII, 理由同 JumpModule 的构造函数注释。
-    auto& s = addEnum("ApplyTo", {sinkGameMultiplier, sinkMaxWalkSpeed}, sinkGameMultiplier,
-                      "Which field to scale (SpeedMultiplier is the game's own)");
+    // 默认作用在 MaxWalkSpeed 上。
+    //
+    // 原本默认选 MovementSpeedMultiplier(游戏自己的复制倍率), 但实测在这个构建上
+    // 定位不可靠: 它不在 UCharacterMovementComponent 的代码生成属性表里, 按其
+    // 参数项反推出的偏移(0x90)又小于基类大小(4048), 判定为其它类的属性。
+    // 而 MaxWalkSpeed 的偏移是从属性表里**读出来的常量**(+0x234), 确定可用。
+    auto& s = addEnum("ApplyTo", {sinkMaxWalkSpeed, sinkGameMultiplier}, sinkMaxWalkSpeed,
+                      "Which field to scale (MaxWalkSpeed is verified on this build)");
     sink_ = &s;
 
     auto& m = addDouble("Multiplier", 1.8, 0.1, maxMultiplier, 0.1, "Speed multiplier");

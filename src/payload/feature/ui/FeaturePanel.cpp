@@ -318,6 +318,13 @@ void FeaturePanel::draw() {
         ImGui::TextColored(ImVec4(0.4f, 1.0f, 0.4f, 1.0f), "player: %s",
                            t.pawnClass.c_str());
         ImGui::Text("movement: %s", t.movementClassName.c_str());
+        // 偏移来源: "反射" 说明运行时反射可用; "静态表(...)" 说明这个构建的
+        // UStruct 布局解不出来, 走的是从二进制属性表读出的已知偏移。
+        const std::string& src = ctx.movement->offsetSource();
+        ImGui::Text("offsets : %s", src.empty() ? "?" : src.c_str());
+        ImGui::Text("  JumpZ=+%#x  MaxWalk=+%#x",
+                    static_cast<unsigned>(ctx.movement->offsets().jumpZVelocity),
+                    static_cast<unsigned>(ctx.movement->offsets().maxWalkSpeed));
     } else {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "player: not resolved");
         const std::string err = ctx.movement ? ctx.movement->lastError() : std::string("no engine");

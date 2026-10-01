@@ -8,6 +8,8 @@
 #include "payload/Payload.h"
 #include "payload/Hooks.h"
 #include "payload/Runtime.h"      // installFrameHook()
+#include "payload/feature/GameContext.h"
+#include "payload/feature/movement/MovementAccess.h"
 #include "payload/ue/Engine.h"
 #include "payload/ue/World.h"
 
@@ -181,6 +183,7 @@ bool CommandServer::execute(std::string_view line) {
         if (rest.size() < 2) { emitLine("用法: findprop <类名> <属性名>"); }
         else findPropertyDirect(rest[0], rest[1]);
     }
+    else if (cmd == "mv" || cmd == "movement") { cmdMovement(); }
     else if (cmd == "scanlevel") {
         // scanlevel <ULevel 地址> —— 在对象上找 TArray 形态的 Actors
         if (rest.empty()) { emitLine("用法: scanlevel <ULevel 地址>"); }
@@ -635,6 +638,55 @@ void CommandServer::dumpPointers(uint64_t addr, int count) {
         }
         emitFmt("  +{:#06x}  {:<18} {}", i * 8, hex(v, 16), note);
     }
+}
+
+// ---------------------------------------------------------------------------
+//  cmdMovement — 读出玩家移动组件上几个关键 float 的当前值
+//
+//  用途: 打开大跳/加速前后各跑一次, 数值变化就能直接印证模块是否真的写进去了。
+//  这条命令不依赖反射(本构建反射解不出属性链), 用的是从二进制属性表里读出的
+//  已知偏移。
+// ---------------------------------------------------------------------------
+void CommandServer::cmdMovement() {
+    auto& mv = feature::movement();
+    if (auto* eng = feature::game().engine; eng != nullptr) {
+        mv.resolve(*eng, true);
+    } else {
+        mv.resolve(eng_, true);
+    }
+
+    emitLine("=== player movement ===");
+    if (!mv.ready()) {
+        emitFmt("not resolved: {}", mv.lastError());
+        return;
+    }
+
+    const auto& t = mv.target();
+    const auto& o = mv.offsets();
+    emitFmt("pawn     : {} ({})", sanitize(t.pawnClass, 36), hex(t.pawn, 16));
+    emitFmt("movement : {} ({})", sanitize(t.movementClassName, 40),
+            hex(t.movement, 16));
+    emitFmt("offsets  : {}", mv.offsetSource().empty() ? "?" : mv.offsetSource());
+    emitLine("");
+    emitFmt("  {:<24} {:>8}  {:>12}", "property", "offset", "value");
+    emitLine("  " + std::string(48, '-'));
+
+    auto show = [&](char const* name, int32_t off) {
+        if (!off) {
+            emitFmt("  {:<24} {:>8}  {:>12}", name, "-", "(no offset)");
+            return;
+        }
+        auto v = mv.readFloat(off);
+        emitFmt("  {:<24} {:>8}  {:>12}",
+                 name, fmt("+{:#x}", off),
+                 v ? fmt("{:.3f}", *v) : std::string("read failed"));
+    };
+    show("MaxWalkSpeed",     o.maxWalkSpeed);
+    show("JumpZVelocity",    o.jumpZVelocity);
+    show("GravityScale",     o.gravityScale);
+    show("AirControl",       o.airControl);
+    show("MaxAcceleration",  o.maxAcceleration);
+    show("MovementSpeedMultiplier", o.speedMultiplier);
 }
 
 // ---------------------------------------------------------------------------

@@ -92,6 +92,10 @@ private:
     // FProperty 的指针"来确认, 最后从该 FProperty 读出 Offset_Internal。
     void findPropertyDirect(std::string_view className, std::string_view propName);
 
+    // 读出玩家移动组件上几个关键 float 的当前值。
+    // 用于验证模块是否真的生效(以及生效前后的对照)。
+    void cmdMovement();
+
     // ---- 帧钩子 ----
     void cmdHooks();          // 显示状态
     void cmdHookInstall();   // 显式安装

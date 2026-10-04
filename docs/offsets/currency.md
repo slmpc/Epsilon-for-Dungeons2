@@ -157,6 +157,12 @@
 另外解析器优先选 **Outer 链能走到本地玩家 pawn** 的那个实例 ——
 玩家身上那个的 Outer 实测就是 `BP_AlexCharacter_C`。
 
+## 代码侧的独立印证
+
+属性表之外，代码里也能直接看到 `0x90`：`ATR_Currency::OnRep_Emeralds` 的实现
+（`0x145B2EC70`）里有 `a1 + 144`，就是新的属性值槽；`a2` 是旧值指针。
+完整反编译与「游戏怎么读这个值」见 [../reverse/currency-path.md](../reverse/currency-path.md)。
+
 ## 游戏更新后怎么修
 
 1. 找到 `ATR_Currency` 的属性名串（`Emeralds` / `EmeraldsMax` / …）

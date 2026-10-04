@@ -13,6 +13,8 @@ import sys
 IMAGE_BASE = 0x140000000
 TARGET_EXE = (r'E:\SteamLibrary\steamapps\common\Minecraft Dungeons II'
               r'\Dungeons\Binaries\Win64\Dungeons-Win64-Shipping.exe')
+UNPACKED_EXE = (r'E:\SteamLibrary\steamapps\common\Minecraft Dungeons II'
+                r'\Dungeons\Binaries\Win64\Dungeons-Win64-Shipping.unpacked.exe')
 
 
 class Image(object):

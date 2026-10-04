@@ -56,6 +56,7 @@
 | [reverse/player-detection.md](reverse/player-detection.md) | 玩家角色判定：实测类名、为什么必须按优先级挑而不是取第一个命中、规则表的唯一出处。 |
 | [reverse/currency-path.md](reverse/currency-path.md) | 货币系统的代码侧：**二进制里保留全部 UFunction 名**（两种记录别混）、名字→实现的全量抓取工具、`GetPlayerCurrency` 与 `OnRep_Emeralds` 的反编译结论、以及为什么最终没做挂钩。 |
 | [reverse/containers.md](reverse/containers.md) | 资源容器与存档：`.pak` 索引的 AES 密钥与解法（6910 个文件清单）、数据体是 **Oodle + AES**、**Oodle 静态链接在 exe 里**、IoStore 现状、以及 `GlobalSaveDataDefault.sav` 的「每字节减 1」混淆。 |
+| [reverse/protection.md](reverse/protection.md) | 原版 exe 的自我保护：代码加密是厂商构建期产物（`Authenticode Valid`）、没有壳 stub、**游戏自己用 FNV 哈希绕开 IAT 解析 `CreateFileA/W`+`Sleep`**、并**替换自己的 `ExitProcess` 走 `TerminateProcess`** —— 这解释了「无转储、无事件、干净消失」的全部现象。 |
 | [reverse/property-verification.md](reverse/property-verification.md) | 属性偏移的四步验证法，附两个实例与完整的可信度分级。 |
 | [reverse/toolchain.md](reverse/toolchain.md) | 逆向工作流：命令表、minidump 三件套、RVA ↔ IDA image base 换算、崩溃分析纪律、已定性崩溃对照表。 |
 

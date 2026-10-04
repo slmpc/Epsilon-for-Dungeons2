@@ -74,6 +74,11 @@ private:
     // oodlefind <输入文件> <原始长度> [扫描上限]: 在文件里扫出能解开的起点。
     void cmdOodleFind(std::vector<std::string> const& args);
 
+    // ---- 退出归因 ----
+    // exitwatch: 钩住进程退出 API, 把调用方 RVA 打出来。
+    // 用来回答"是谁让游戏退出的", 不靠猜。
+    void cmdExitWatch();
+
     // ---- 帧钩子 ----
     void cmdHooks();
     void cmdHookInstall();

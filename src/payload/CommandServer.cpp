@@ -16,6 +16,7 @@
 #  define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>     // WideCharToMultiByte / CP_UTF8
+#include <MinHook.h>
 
 #include <algorithm>
 #include <cmath>
@@ -189,6 +190,7 @@ bool CommandServer::execute(std::string_view line) {
     else if (cmd == "currency" || cmd == "emerald" || cmd == "em") { cmdCurrency(rest); }
     else if (cmd == "oodle") { cmdOodle(rest); }
     else if (cmd == "oodlefind") { cmdOodleFind(rest); }
+    else if (cmd == "exitwatch") { cmdExitWatch(); }
     else if (cmd == "floats" || cmd == "f") {
         // floats <地址> [个数] —— 按 float 解读一段内存
         if (rest.empty()) { emitLine("用法: floats <地址> [个数]"); }
@@ -957,6 +959,108 @@ void CommandServer::cmdOodleFind(std::vector<std::string> const& args) {
     } else {
         emitFmt("命中 {} 处", hits);
     }
+}
+
+// ---------------------------------------------------------------------------
+//  cmdExitWatch — 钩住进程退出 API，把调用方 RVA 记下来
+//
+//  用途: 判断"游戏是自己退出、还是被谁终止"。静态分析只能看到有哪些 API，
+//  看不到谁调用；钩一层就能把调用方 RVA 与退出码直接落盘。
+//  钩子只记录并转发，不改变行为。
+// ---------------------------------------------------------------------------
+namespace {
+
+using ExitProcessFn  = void(__stdcall*)(UINT);
+using TerminateFn    = BOOL(__stdcall*)(HANDLE, UINT);
+using RtlExitFn      = void(__fastcall*)(int32_t);
+
+ExitProcessFn gExitProcessOrig = nullptr;
+TerminateFn   gTerminateOrig   = nullptr;
+RtlExitFn     gRtlExitOrig     = nullptr;
+
+constexpr uint64_t exitLogIntervalMs = 1000;
+uint64_t gExitLogLastMs = 0;
+
+uint64_t gModuleBase = 0;
+
+void noteExit(char const* which, void* caller, uint32_t code) {
+    const uint64_t rva = caller && gModuleBase
+                             ? reinterpret_cast<uint64_t>(caller) - gModuleBase
+                             : 0;
+    // 每条都记, 但连续重复时做节流, 免得日志被刷爆。
+    const uint64_t now = ::GetTickCount64();
+    const char* module = "?";
+    static char buf[64];
+    HMODULE h = nullptr;
+    if (::GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                             reinterpret_cast<LPCSTR>(caller), &h) && h) {
+        if (::GetModuleFileNameA(h, buf, sizeof(buf))) {
+            const char* p = strrchr(buf, '\\');
+            module = p ? p + 1 : buf;
+        }
+    }
+    if (now - gExitLogLastMs >= exitLogIntervalMs) {
+        gExitLogLastMs = now;
+        trace(fmt("[ExitWatch] {}  code={:#x}  caller={}  RVA={:#x}  模块={}",
+                  which, code, hex(reinterpret_cast<uint64_t>(caller), 16), rva, module));
+    }
+}
+
+void __stdcall exitProcessDetour(UINT code) {
+    noteExit("ExitProcess", _ReturnAddress(), code);
+    gExitProcessOrig(code);
+}
+
+BOOL __stdcall terminateProcessDetour(HANDLE proc, UINT code) {
+    noteExit("TerminateProcess", _ReturnAddress(), code);
+    return gTerminateOrig(proc, code);
+}
+
+void __fastcall rtlExitDetour(int32_t code) {
+    noteExit("RtlExitUserProcess", _ReturnAddress(), static_cast<uint32_t>(code));
+    gRtlExitOrig(code);
+}
+
+} // namespace
+
+void CommandServer::cmdExitWatch() {
+    MH_STATUS st = MH_Initialize();
+    if (st != MH_OK && st != MH_ERROR_ALREADY_INITIALIZED) {
+        emitFmt("MH_Initialize 失败: {}", static_cast<int>(st));
+        return;
+    }
+    gModuleBase = eng_.moduleBase();
+
+    struct Target {
+        char const*  name;
+        char const*  module;
+        void*        detour;
+        void**       orig;
+    };
+    const Target targets[] = {
+        {"ExitProcess",         "kernel32.dll", reinterpret_cast<void*>(&exitProcessDetour),    reinterpret_cast<void**>(&gExitProcessOrig)},
+        {"TerminateProcess",    "kernel32.dll", reinterpret_cast<void*>(&terminateProcessDetour), nullptr},
+        {"RtlExitUserProcess",  "ntdll.dll",    reinterpret_cast<void*>(&rtlExitDetour),         reinterpret_cast<void**>(&gRtlExitOrig)},
+    };
+
+    for (auto const& t : targets) {
+        HMODULE mod = ::GetModuleHandleA(t.module);
+        if (!mod) { emitFmt("   {} : 拿不到 {}", t.name, t.module); continue; }
+        void* fn = reinterpret_cast<void*>(::GetProcAddress(mod, t.name));
+        if (!fn) { emitFmt("   {} : 模块里没有这个导出", t.name); continue; }
+
+        st = MH_CreateHook(fn, t.detour, t.orig);
+        if (st != MH_OK) {
+            emitFmt("   {} : MH_CreateHook 失败 {}", t.name, static_cast<int>(st));
+            continue;
+        }
+        st = MH_EnableHook(fn);
+        emitFmt("   {} @ {} : {} ({})", t.name, hex(reinterpret_cast<uint64_t>(fn), 16),
+                st == MH_OK ? "已挂钩" : "MH_EnableHook 失败",
+                st == MH_OK ? 0 : static_cast<int>(st));
+    }
+    emitLine("钩子已就位 —— 游戏退出时会往日志写调用方 RVA");
 }
 
 // ---------------------------------------------------------------------------

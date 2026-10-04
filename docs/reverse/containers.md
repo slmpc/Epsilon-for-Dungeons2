@@ -210,7 +210,47 @@ epsilon> oodle <输入文件> <输出文件> <原始长度>
 输入应当是**已解密**的 Oodle 压缩数据。RVA 记在 `offsets::oodle`
 （`OodleLZ_Decompress` 的 RVA = `0x07CA8CE0`）。
 
-## 六、存档
+## 六、离线解压尝试（已做，结论：解不开）
+
+本机在 `E:\SteamLibrary\steamapps\common\Call of Duty HQ\oo2core_8_win64.dll`
+有一份第三方 Oodle。**先用它把整条链的封装验证通**：
+
+```
+OodleLZ_Compress -> OodleLZ_Decompress 往返:
+  23000 字节 -> 压缩 80 字节 -> 解回 23000 字节, sha256 一致
+```
+
+顺带看到 Oodle 流长什么样（`ff 1f` 后直接跟字面量）：
+
+```
+8c 02 00 36 ff 1f | 4d 69 6e 65 63 72 61 66 74 20   ("Minecraft ")
+```
+
+**封装正确**，所以「扫不到」是结论而不是 bug。随后做**穷举**：
+
+| 维度 | 范围 |
+|---|---|
+| AES 解密对齐 | `0x00 ~ 0xF0` 步长 16（覆盖所有可能的头部长度） |
+| 流起点 | 窗口内 `0x00 ~ 0x200` 每个字节 |
+| 原始长度候选 | `13978`（内联头）与 `14010`（编码条目） |
+
+**共 16384 种组合，全部失败**（[`analysis/re/oodle_sweep.py`](../../analysis/re/oodle_sweep.py)）。
+
+于是只剩三种可能，且**目前无法区分**：
+
+1. **载荷的密钥/算法不是索引那把 AES-256-ECB**（索引与载荷可能用不同密钥）
+2. **本构建的 Oodle 比 oo2core_8 新** —— UE5.6 用的是 Oodle 2.9.x，
+   而 `oo2core_8` 属更早的版本；**解码器不能解比自己新的流**
+3. 原始长度不是我试的那两个
+
+> 判别方向：拿到一份**同版本**的 Oodle 解码器（或从游戏 exe 里调它自己的
+> `OodleLZ_Decompress`，见第五节 —— 注入体里已有 `oodle` / `oodlefind` 命令），
+> 再跑同一个穷举即可。若换了正确的解码器就命中，则原因是 2；仍不中则偏向 1。
+
+**在拿到同版本解码器之前，pak 载荷取不出来。**
+能拿到的仍是：完整文件清单 + 每个条目的大小/方法/哈希。
+
+## 七、存档
 
 `%LOCALAPPDATA%\Dungeons2\Saved\SaveGames\`
 
@@ -233,7 +273,7 @@ z!aknar!   +1   {"blobs"
 **只有全局设置，没有角色进度或货币** —— 所以
 [../features/emerald.md](../features/emerald.md) 仍然走运行时改内存。
 
-## 六、工具
+## 八、工具
 
 | 脚本 | 作用 |
 |---|---|
@@ -241,18 +281,23 @@ z!aknar!   +1   {"blobs"
 | [`entropy_scan.py`](../../analysis/re/entropy_scan.py) | 分块熵/可打印率，判断明文/压缩/加密（换游戏通用） |
 | [`unpak.py`](../../analysis/re/unpak.py) | `.pak` 索引解密 + 文件清单（`--key` 传密钥） |
 | [`test_aes_key.py`](../../analysis/re/test_aes_key.py) | 验证一个候选密钥是否有效 |
-| [`probe_pak_data.py`](../../analysis/re/probe_pak_data.py) | 判断数据区是明文还是压缩/加密 |
+| [`extract_pak.py`](../../analysis/re/extract_pak.py) | 解析条目表（两种变体）+ 内联 `FPakEntry` |
+| [`oodle_offline.py`](../../analysis/re/oodle_offline.py) | 用第三方 oo2core DLL 离线试解 Oodle 流 |
+| [`oodle_selftest.py`](../../analysis/re/oodle_selftest.py) | **先跑这个** —— 压缩/解压往返验证调用封装 |
+| [`oodle_sweep.py`](../../analysis/re/oodle_sweep.py) | 穷举（解密对齐 × 流起点 × 原始长度） |
 | [`decode_save.py`](../../analysis/re/decode_save.py) | 解开 `GlobalSaveDataDefault.sav` |
 
 ```powershell
-python analysis/re/unpak.py --key <hex> --stat          # 列 6910 个文件 + 扩展名分布
+python analysis/re/oodle_selftest.py                          # 先验证封装
+python analysis/re/unpak.py --key <hex> --stat                # 列 6910 个文件
+python analysis/re/oodle_sweep.py 0x396800 13978,14010        # 穷举某条目
 ```
 
-## 七、下一步
+## 九、下一步
 
-1. 在 `0x147ca6xxx` 区里确认 `OodleLZ_Decompress` 的确切入口（可用签名匹配，
-   或从 `FOodleDataCompression::Decompress` 的调用点反推）
-2. 解析 `EncodedPakEntries` 得到每个文件的 offset/size/压缩标志
-3. 在注入体里加一个 `oodle` 命令：把解密后的块交给游戏自己的 `OodleLZ_Decompress`
-4. IoStore 那 9.1 GB **是否用同一把密钥尚未验证** —— 它的数据同样是高熵，
-   Oodle 与加密哪个在先、密钥是否相同，都要等 Oodle 通道打通后才能判定
+1. **拿一份同版本的 Oodle 解码器**（本构建是 UE5.6 → Oodle 2.9.x，
+   而手边的 `oo2core_8` 太旧），或者**调游戏自己的**
+   —— 注入体里已有 `oodle` / `oodlefind` 命令，入口 `0x147CA8CE0`
+2. 用它重跑 `oodle_sweep.py` 的同一组穷举：
+   **命中 ⇒ 原因是「解码器版本」；仍不中 ⇒ 偏向「载荷密钥与索引不同」**
+3. IoStore 那 9.1 GB **是否用同一把密钥尚未验证**

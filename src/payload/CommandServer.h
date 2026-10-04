@@ -68,6 +68,10 @@ private:
     // currency: 列出已解析的货币持有者与 6 个字段; 带 class= 时列出候选类。
     void cmdCurrency(std::vector<std::string> const& args);
 
+    // ---- 资源解包 ----
+    // oodle <输入文件> <输出文件> <原始长度>: 调用游戏自己的 OodleLZ_Decompress。
+    void cmdOodle(std::vector<std::string> const& args);
+
     // ---- 帧钩子 ----
     void cmdHooks();
     void cmdHookInstall();

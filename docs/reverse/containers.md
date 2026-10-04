@@ -114,64 +114,103 @@ uint8   EncodedPakEntries[]
 > 注意：**主资源不在这里**。这个 pak 是松散内容包（图标/字体/本地化/关卡 JSON），
 > 烘焙过的 `.uasset` 在 9.1 GB 的 IoStore `.ucas` 里。
 
-## 三、数据体：Oodle 压缩 + 加密
+## 三、`EncodedPakEntries` 的两种变体
 
-对数据区 `[0, IndexOffset)` 取样，分别按「原样」与「AES 解密」两种读法统计：
+`FullDirectoryIndex` 给的是 `(目录, 文件数, [(文件名, loc)])`，`loc` 是
+**EncodedPakEntries 里的字节偏移**（不是文件偏移、也不是数组下标）。
+长度实测**只有 12 与 20 两种**：
 
-| 读法 | 可打印率 |
-|---|---|
-| 原样 | 0.342 ~ 0.373 |
-| AES-256-ECB 解密 | 0.368 ~ 0.374 |
+| 长度 | 形态 | 含义 |
+|---|---|---|
+| `12` | `{u32 flags, u32 pakOffset, u32 size}` | 未压缩（csize == usize，不必存两个） |
+| `20` | `{u32 flags, u32 pakOffset, u32 usize, u32 csize, u32 extra}` | 压缩（两个大小都要存） |
 
-均匀随机字节的可打印率期望 = `95/256 ≈ 0.371`。**两种读法都贴着它**，
-且明文字节特征 `\r\n` 在 253 MB 里命中 3812 次 —— 恰好等于随机分布下的期望值（≈3862）。
+6910 条里：**2591 条是 20 字节变体，4313 条是 12 字节变体**，另有 6 条读不出来。
 
-**结论：数据区没有任何明文。** 索引能解而数据解不出可读内容，唯一解释是
-**先 Oodle 压缩再加密**（压缩后的流本来就像随机数，再加密仍是随机数）。
-
-## 四、Oodle 是静态链接在 exe 里的 ★
-
-游戏目录**没有** `oo2core*.dll`，但 exe 里有完整的 Oodle：
+`pakOffset` 处内联着一个 `FPakEntry`，**内容是明文**。判据不是「看着像」，而是
+把读出来的 `Size` 与编码条目给的 `csize` 对账 —— **2591 条全部吻合**，
+猜出来的结构不会这么齐：
 
 ```
-0x14a9a7c58  'v:\devel\projects\oodle2\core\oodlecoreplugins_gen.inc'
+int64  Offset          (内联时为 0)
+int64  Size            压缩后大小
+int64  UncompressedSize
+u32    CompressionMethodIndex   (0 = 未压缩, 1 = Oodle)
+u8     Hash[20]        SHA-1
+[若压缩] int32 NumBlocks + NumBlocks*(int64 start, int64 end)
+...  Flags / CompressionBlockSize
+```
+
+压缩条目示例（`Dungeons/Config/DefaultActorStateGimmicks.ini` @ `0x396800`）：
+
+```
+00000000 00000000   Offset = 0
+A0050000 00000000   Size = 1440
+BA360000 00000000   UncompressedSize = 13978
+01000000            CompressionMethodIndex = 1 (Oodle)
+CD7CE13E…           SHA-1 (20 字节)
+01000000            NumBlocks = 1
+49000000 00000000   block[0].start
+E6050000 00000000   block[0].end
+```
+
+## 四、数据体：头部明文，载荷全高熵
+
+- **`FPakEntry` 头部是明文**（见上，对账通过）。
+- **载荷全部高熵**：整段解密后逐 MiB 检查没有一处可读；
+  明文标志 `\r\n` 在 253 MB 里命中 3898 次，随机分布的期望值是 ≈3866 —— 贴着期望值。
+
+那 2591 条（20 字节变体）的头部实测**全是 `method=1`（Oodle）**。
+
+⚠️ **未解决**：那 4313 条 12 字节变体的头部写着 `method=0`，
+**但载荷同样不是明文**。两种解释都没排除：
+
+1. 它们其实也是 Oodle 压缩，只是 `method` 字段在 12 字节变体下读法不同；
+2. 这些条目被**逐条加密**（`Flags` 字节实测是 `01`，与「加密」吻合），
+   逐条加密的 ECB 对齐基点与整段解密不同，所以整段解密拿不到明文。
+
+**判定它必须先打通 Oodle 通道** —— 解压成功的条目会立刻说明是压缩还是加密。
+在此之前 **pak 载荷取不出来**；能拿到的是：完整文件清单 + 每个条目的大小/方法/哈希。
+
+## 五、Oodle 是静态链接在 exe 里的 ★
+
+游戏目录**没有** `oo2core*.dll`，但 exe 里 Oodle 是全的：
+
+```
 0x14a9a7d10  压缩级别名: HyperFast1..4 / SuperFast / VeryFast / Fast / Optimal1..5
 0x14a9a7dd8  解码器名:  LZHLW / LZNIB / LZB16 / LZBLW / LZNA / Kraken / Mermaid
                        / BitKnit / Selkie / Hydra / Leviathan
-0x14a9a7ed0  'OODLE ERROR : Legacy LZ VTable not installed'
+0x14a9a86d8  "oo2::OodleLZ_Decompress"    <- 定位靠它
 ```
 
-代码集中在 **`0x147ca6xxx`** 一带：
+### 怎么定位到的（这个手法可复用）
 
-| 地址 | 大小 | 备注 |
+Oodle 的日志宏把**函数名当字符串字面量嵌进函数体**。所以
+**去找引用 `"oo2::OodleLZ_Decompress"` 的那个函数**，就是它本体：
+
+| 函数 | 地址 | 判定 |
 |---|---|---|
-| `0x147ca6cc0` | `0xc2` | 引用 Oodle 源文件路径串 |
-| `0x147ca6ea0` | `0x112` | 同上 |
-| `0x147ca6fc0` | `0x158` | 同上 |
-| `0x147ca7240` | `0x27c` | 同上 |
-| `0x147ca75c0` | `0xddd` | 大函数，`OodleLZ_Decompress` 候选 |
-| `0x147ca83a0` | `0x5e` | `OodleLZDecoder_MemorySizeNeeded` 相关 |
+| `OodleLZ_Decompress` | `0x147CA8CE0` | 14 个形参，第 10 个是回调函数指针 —— 与 Oodle 公开签名逐项吻合 |
+| `OodleLZ_Compress` | `0x147CA8400` | 同法 |
+| `OodleLZ_Compressor_to_DecodeType` | `0x147CA6FC0` | 同法 |
 
-> `OodleLZ_Decompress` 之类**函数名字符串**在 `.rdata` 里的名字表（`0x14a9a86dd`），
-> 没有代码交叉引用 —— 别指望靠名字串找到函数体，要靠签名或从调用者上溯。
+> ⚠️ 别从 `.rdata` 的**纯名字串**找：`OodleLZ_Decompress`（`0x14a9a86dd`）
+> **没有任何代码交叉引用**。要找的是**带 `oo2::` 前缀的那一份**（`0x14a9a86d8`）。
+> 本次先在这个坑上白跑了一轮。
 
-**这意味着解压是可行的**：不需要第三方 Oodle SDK，直接调用游戏自己的
-`OodleLZ_Decompress` 即可 —— 而注入通路本来就是通的（
-见 [../payload/lifecycle.md](../payload/lifecycle.md)）。
+### 怎么用
 
-`OodleLZ_Decompress` 的签名（Oodle 公开头文件）：
+注入体里已经加了 `oodle` 命令（[`CommandServer.cpp`](../../src/payload/CommandServer.cpp)），
+把游戏自己的 `OodleLZ_Decompress` 当解压器使：
 
-```c
-OO_SINTa OodleLZ_Decompress(const void* compBuf, OO_SINTa compBufSize,
-                            void* rawBuf, OO_SINTa rawLen,
-                            OodleLZ_FuzzSafe, OodleLZ_CheckCRC, OodleLZ_Verbosity,
-                            void* decBufBase, OO_SINTa decBufSize,
-                            OodleLZ_DecompressCallback*, void* userData,
-                            void* decoderMemory, OO_SINTa decoderMemorySize,
-                            OodleLZ_Decode_ThreadPhase);
+```
+epsilon> oodle <输入文件> <输出文件> <原始长度>
 ```
 
-## 五、存档
+输入应当是**已解密**的 Oodle 压缩数据。RVA 记在 `offsets::oodle`
+（`OodleLZ_Decompress` 的 RVA = `0x07CA8CE0`）。
+
+## 六、存档
 
 `%LOCALAPPDATA%\Dungeons2\Saved\SaveGames\`
 

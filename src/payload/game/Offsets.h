@@ -110,6 +110,20 @@ inline constexpr uint32_t num  = 0x08;
 inline constexpr uint32_t max  = 0x0C;
 } // namespace stringData
 
+// ---------------------------------------------------------------- Oodle 解压
+// Oodle 是**静态链接**在映像里的(发行版不带 oo2core*.dll), 所以只能调游戏自己的。
+// 入口靠「Oodle 的日志宏把函数名当字面量嵌进函数体」定位: 找到引用
+// "oo2::OodleLZ_Decompress" 的代码就是它。签名见 docs/reverse/containers.md。
+namespace oodle {
+inline constexpr uint32_t decompressRva = 0x07CA8CE0;   // 未修正的 RVA, 用前加模块基址
+
+// OodleLZ_FuzzSafe / CheckCRC / Verbosity 的取值。
+inline constexpr int32_t fuzzSafeNo  = 0;
+inline constexpr int32_t fuzzSafeYes = 1;
+inline constexpr int32_t checkCrcNo  = 0;
+inline constexpr int32_t verbosityNone = 0;
+} // namespace oodle
+
 // ---------------------------------------------------------------- D3D12 COM vtable 索引
 namespace d3d12 {
 // IDXGISwapChain::Present = IUnknown(3) + IDXGIObject(4) + IDXGIDeviceSubObject(1)

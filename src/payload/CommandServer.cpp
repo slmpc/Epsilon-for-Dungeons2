@@ -187,6 +187,7 @@ bool CommandServer::execute(std::string_view line) {
     else if (cmd == "mv" || cmd == "movement") { cmdMovement(); }
     else if (cmd == "attrmv" || cmd == "attrs") { cmdAttributeMovement(); }
     else if (cmd == "currency" || cmd == "emerald" || cmd == "em") { cmdCurrency(rest); }
+    else if (cmd == "oodle") { cmdOodle(rest); }
     else if (cmd == "floats" || cmd == "f") {
         // floats <地址> [个数] —— 按 float 解读一段内存
         if (rest.empty()) { emitLine("用法: floats <地址> [个数]"); }
@@ -789,6 +790,90 @@ void CommandServer::cmdCurrency(std::vector<std::string> const& args) {
         emitLine(reverted == 0 ? "   -> 保住了"
                                : fmt("   -> 被改回 {}/8 次(GAS 会在聚合时重算)", reverted));
     }
+}
+
+// ---------------------------------------------------------------------------
+//  cmdOodle — 借游戏自己的 OodleLZ_Decompress 解压一个文件
+//
+//  Oodle 静态链接在映像里(发行版不带 oo2core*.dll), 没有现成的解压器可用,
+//  而 pak 内容全是 Oodle 压缩的 —— 所以只能调游戏自己的那份。
+//  调用是纯计算, 不改游戏状态。
+// ---------------------------------------------------------------------------
+void CommandServer::cmdOodle(std::vector<std::string> const& args) {
+    namespace od = epsilon::game::offsets::oodle;
+
+    if (args.size() < 3) {
+        emitLine("用法: oodle <输入文件> <输出文件> <原始长度>");
+        emitLine("  输入应当是**已解密**的 Oodle 压缩数据");
+        return;
+    }
+
+    const uint64_t fn = eng_.moduleBase() + od::decompressRva;
+    if (!fn || !eng_.moduleBase()) {
+        emitLine("拿不到模块基址, 无法定位 OodleLZ_Decompress");
+        return;
+    }
+
+    uint64_t rawLen = 0;
+    try { rawLen = std::stoull(args[2], nullptr, 0); } catch (...) {
+        emitLine("原始长度解析失败");
+        return;
+    }
+    if (rawLen == 0 || rawLen > (64ull << 20)) {
+        emitLine("原始长度不合理(限 64 MiB 以内)");
+        return;
+    }
+
+    // 读输入
+    HANDLE in = ::CreateFileA(args[0].c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (in == INVALID_HANDLE_VALUE) {
+        emitFmt("打不开输入 {} (GetLastError={})", args[0], ::GetLastError());
+        return;
+    }
+    LARGE_INTEGER li{};
+    ::GetFileSizeEx(in, &li);
+    std::vector<uint8_t> comp(static_cast<size_t>(li.QuadPart));
+    DWORD got = 0;
+    const bool readOk = ::ReadFile(in, comp.data(), static_cast<DWORD>(comp.size()),
+                                   &got, nullptr) != 0;
+    ::CloseHandle(in);
+    if (!readOk || got != comp.size()) {
+        emitLine("读输入失败");
+        return;
+    }
+
+    std::vector<uint8_t> plain(static_cast<size_t>(rawLen), 0);
+
+    using DecompressFn = int64_t(__fastcall*)(const void*, int64_t, void*, int64_t,
+                                              int32_t, int32_t, int32_t,
+                                              void*, int64_t, void*, void*,
+                                              void*, int64_t, uint32_t);
+    auto decompress = reinterpret_cast<DecompressFn>(fn);
+
+    emitFmt("OodleLZ_Decompress @ {}  输入 {} 字节 -> 期望 {} 字节",
+             hex(fn, 16), comp.size(), rawLen);
+
+    const int64_t n = decompress(comp.data(), static_cast<int64_t>(comp.size()),
+                                 plain.data(), static_cast<int64_t>(plain.size()),
+                                 od::fuzzSafeYes, od::checkCrcNo, od::verbosityNone,
+                                 nullptr, 0, nullptr, nullptr, nullptr, 0, 0);
+    emitFmt("返回 {}", n);
+    if (n <= 0) {
+        emitLine("解压失败 —— 输入不是合法的 Oodle 流(或原始长度不对)");
+        return;
+    }
+
+    HANDLE out = ::CreateFileA(args[1].c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (out == INVALID_HANDLE_VALUE) {
+        emitFmt("写输出失败 GetLastError={}", ::GetLastError());
+        return;
+    }
+    DWORD wrote = 0;
+    ::WriteFile(out, plain.data(), static_cast<DWORD>(n), &wrote, nullptr);
+    ::CloseHandle(out);
+    emitFmt("已写出 {}  ({} 字节)", args[1], wrote);
 }
 
 // ---------------------------------------------------------------------------

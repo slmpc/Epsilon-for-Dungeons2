@@ -188,6 +188,7 @@ bool CommandServer::execute(std::string_view line) {
     else if (cmd == "attrmv" || cmd == "attrs") { cmdAttributeMovement(); }
     else if (cmd == "currency" || cmd == "emerald" || cmd == "em") { cmdCurrency(rest); }
     else if (cmd == "oodle") { cmdOodle(rest); }
+    else if (cmd == "oodlefind") { cmdOodleFind(rest); }
     else if (cmd == "floats" || cmd == "f") {
         // floats <地址> [个数] —— 按 float 解读一段内存
         if (rest.empty()) { emitLine("用法: floats <地址> [个数]"); }
@@ -874,6 +875,88 @@ void CommandServer::cmdOodle(std::vector<std::string> const& args) {
     ::WriteFile(out, plain.data(), static_cast<DWORD>(n), &wrote, nullptr);
     ::CloseHandle(out);
     emitFmt("已写出 {}  ({} 字节)", args[1], wrote);
+}
+
+// ---------------------------------------------------------------------------
+//  cmdOodleFind — 在一个文件里扫出能成功解压的起点
+//
+//  用途: pak 条目的载荷起点偏移未知时, 不必反复出入进程逐个试 —— 一次调用把
+//  一个偏移区间扫完。命中即说明「这个偏移是 Oodle 流起点」, 顺带把该条目的
+//  数据类型(压缩/未压缩/加密)判定出来。
+// ---------------------------------------------------------------------------
+void CommandServer::cmdOodleFind(std::vector<std::string> const& args) {
+    namespace od = epsilon::game::offsets::oodle;
+
+    if (args.size() < 2) {
+        emitLine("用法: oodlefind <输入文件> <原始长度> [扫描上限默认 0x200]");
+        return;
+    }
+
+    const uint64_t fn = eng_.moduleBase() + od::decompressRva;
+    if (!fn || !eng_.moduleBase()) {
+        emitLine("拿不到模块基址");
+        return;
+    }
+
+    uint64_t rawLen = 0;
+    uint64_t scanMax = 0x200;
+    try { rawLen = std::stoull(args[1], nullptr, 0); } catch (...) {}
+    if (args.size() >= 3) {
+        try { scanMax = std::stoull(args[2], nullptr, 0); } catch (...) {}
+    }
+    if (rawLen == 0 || rawLen > (64ull << 20) || scanMax > 0x10000) {
+        emitLine("参数不合理");
+        return;
+    }
+
+    HANDLE in = ::CreateFileA(args[0].c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (in == INVALID_HANDLE_VALUE) {
+        emitFmt("打不开输入 {} (GetLastError={})", args[0], ::GetLastError());
+        return;
+    }
+    LARGE_INTEGER li{};
+    ::GetFileSizeEx(in, &li);
+    std::vector<uint8_t> comp(static_cast<size_t>(li.QuadPart));
+    DWORD got = 0;
+    const bool ok = ::ReadFile(in, comp.data(), static_cast<DWORD>(comp.size()),
+                               &got, nullptr) != 0;
+    ::CloseHandle(in);
+    if (!ok || got != comp.size() || comp.size() < 64) {
+        emitLine("读输入失败或文件太小");
+        return;
+    }
+
+    std::vector<uint8_t> plain(static_cast<size_t>(rawLen), 0);
+
+    using DecompressFn = int64_t(__fastcall*)(const void*, int64_t, void*, int64_t,
+                                              int32_t, int32_t, int32_t,
+                                              void*, int64_t, void*, void*,
+                                              void*, int64_t, uint32_t);
+    auto decompress = reinterpret_cast<DecompressFn>(fn);
+
+    emitFmt("扫描 {} ({} 字节), 期望原始长度 {}", args[0], comp.size(), rawLen);
+
+    int hits = 0;
+    const uint64_t limit = std::min<uint64_t>(scanMax, comp.size() - 1);
+    for (uint64_t off = 0; off <= limit; ++off) {
+        const int64_t n = decompress(comp.data() + off,
+                                     static_cast<int64_t>(comp.size() - off),
+                                     plain.data(), static_cast<int64_t>(plain.size()),
+                                     od::fuzzSafeYes, od::checkCrcNo, od::verbosityNone,
+                                     nullptr, 0, nullptr, nullptr, nullptr, 0, 0);
+        if (n > 0) {
+            emitFmt("   +{:#06x}  解出 {} 字节", off, n);
+            ++hits;
+            if (hits >= 8) break;
+        }
+    }
+    if (hits == 0) {
+        emitLine("   没有命中 —— 该区间内没有合法 Oodle 流");
+        emitLine("   (要么数据被加密, 要么原始长度不对, 要么起点在本区间之外)");
+    } else {
+        emitFmt("命中 {} 处", hits);
+    }
 }
 
 // ---------------------------------------------------------------------------

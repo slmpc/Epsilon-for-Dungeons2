@@ -71,6 +71,8 @@ private:
     // ---- 资源解包 ----
     // oodle <输入文件> <输出文件> <原始长度>: 调用游戏自己的 OodleLZ_Decompress。
     void cmdOodle(std::vector<std::string> const& args);
+    // oodlefind <输入文件> <原始长度> [扫描上限]: 在文件里扫出能解开的起点。
+    void cmdOodleFind(std::vector<std::string> const& args);
 
     // ---- 帧钩子 ----
     void cmdHooks();

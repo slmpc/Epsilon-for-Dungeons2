@@ -34,6 +34,9 @@ env/
 *.dmp
 *.dump
 *.bin.tmp
+# 从游戏二进制导出的名字/地址映射: 可复现, 且属于派生的游戏数据, 不入库
+build_nativefuncs.txt
+nativefuncs_map.txt
 
 # ---- 编译器数据库(由 CMake 生成) ----
 compile_commands.json

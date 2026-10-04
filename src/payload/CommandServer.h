@@ -64,6 +64,10 @@ private:
     // mvset <字段名|裸偏移> <数值>: 一次性直写, 带回读与采样。
     void setMovementValue(std::string_view field, float value);
 
+    // ---- 货币 (绿宝石) ----
+    // currency: 列出已解析的货币持有者与 6 个字段; 带 class= 时列出候选类。
+    void cmdCurrency(std::vector<std::string> const& args);
+
     // ---- 帧钩子 ----
     void cmdHooks();
     void cmdHookInstall();

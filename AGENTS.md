@@ -127,6 +127,11 @@ VS 自带的 vcpkg，而本项目的 baseline 与已装依赖在用户自己的 
 （表现为 `create_directories(...VC\vcpkg\installed): Access is denied`）。
 若已踩到：删掉 `build/<preset>` 重新配置。
 
+⚠️ 脚本还会先 `chcp.com 65001`。**别去掉它** —— 中文区域下 cl.exe 的 `/showIncludes`
+输出是 GBK，CMake 按 UTF-8 解码后写进 `rules.ninja` 的是乱码，Ninja 匹配不上于是
+**头文件依赖全部丢失**：只改 `.h` 的改动会被静默跳过，构建"成功"但产物是旧的。
+`VSLANG=1033` 不管用。详见 [`docs/dev/diagnostics.md`](docs/dev/diagnostics.md)。
+
 ---
 
 ## 关键设计约束
@@ -175,11 +180,14 @@ VS 自带的 vcpkg，而本项目的 baseline 与已装依赖在用户自己的 
 
 ### 属性偏移的正确来源：代码生成属性表
 
-**不要靠猜布局来拿属性偏移。** UE 的 UHT 会为每个类生成参数表，其中
+**不要靠猜布局来拿属性偏移。** UE 的 UHT 会为每个类生成参数表，
 `STRUCT_OFFSET(Class, Property)` 是**编译期常量**，Shipping 构建里就在 `.rdata` 里可直接读。
 
-⚠️ 两张表的项布局不同：`UCharacterMovementComponent` 表的偏移在 `+0x2c`，
-`ATR_Movement` 表在 `+0x24`。见 [`docs/offsets/README.md`](docs/offsets/README.md)。
+⚠️ **表项布局不是统一的**，偏移字段的位置**必须逐表实测**，不要跨表套用解析代码。
+`ATR_*` 属性表实测是「名字在记录 `+0x00`、`Offset_Internal` 在记录 `+0x34`」，
+判定过程（以及它和仓库里 `ATR_Movement` 常数配法的差异）见
+[`docs/offsets/currency.md`](docs/offsets/currency.md) 与
+[`docs/offsets/README.md`](docs/offsets/README.md)。
 
 ### 玩家角色的类名
 
@@ -227,6 +235,7 @@ exception code / exception address / fault address，换算 RVA 后回 IDA 定�
 | `player` | 列出关卡里的玩家候选与模块会选中的那个 |
 | `mv` | 读玩家移动组件上几个关键 float 的当前值 |
 | `attrmv` | 找出玩家的 `ATR_Movement` 并打印属性块 |
+| `currency` | 打印 `ATR_Currency` 的 7 条货币属性与整块属性区（`set=` 直写、`class=` 列候选类） |
 | `hook` | 装 Present 钩子（覆盖层需要） |
 | `world` / `actors` | 当前 `UWorld` / `ULevel` / Actor 列表 |
 | `objects` / `find` / `class` | 对象表查询 |

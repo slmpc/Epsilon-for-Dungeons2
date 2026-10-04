@@ -29,6 +29,7 @@
 | [features/module-framework.md](features/module-framework.md) | 模块 / 设置 / 配置框架：`Module` 基类与 Java 版的三处刻意偏离、`Category`、`BindMode` 与按键分发三步、dirty 增量保存、`Setting` 类型体系、`ConfigManager` 文件布局与容错、`setDefaultXxx` 与 `reset()` 的连带陷阱。 |
 | [features/ui.md](features/ui.md) | 游戏内 `Modules` 面板：绘制结构、各类型控件、改键捕获（含悬垂指针坑），以及**面板文案必须纯 ASCII 英文**的原因与 `????????????(???, ??? Mock/Mob)` 踩坑记录。 |
 | [features/speed-jump.md](features/speed-jump.md) | `Speed` / `Jump` 两个模块：三个可选目标与走过的弯路、为什么每帧写而不是写一次、为什么默认关闭。 |
+| [features/emerald.md](features/emerald.md) | `Emerald` 模块：绿宝石是 GAS 属性不是整数成员、为什么放大「增量」而不是维持「基线 × 倍率」、以及为什么它比 `Speed` 简单。 |
 
 ### 偏移表
 
@@ -42,6 +43,7 @@
 | [offsets/world.md](offsets/world.md) | `UWorld::PersistentLevel`、`ULevel::Actors`、`TArray` 头，以及未验证的候选偏移。 |
 | [offsets/character-movement.md](offsets/character-movement.md) | `UCharacterMovementComponent` 的 13 个 float 字段、类继承链、为什么 `GravityScale` 存疑。 |
 | [offsets/movement-attributes.md](offsets/movement-attributes.md) | GAS 属性集 `ATR_Movement` 的 12 个属性、**表偏移整体差 8 字节**的判定过程、写入实验记录。 |
+| [offsets/currency.md](offsets/currency.md) | GAS 属性集 `ATR_Currency` 的 7 个货币属性、**属性表里 `Offset_Internal` 在记录 `+0x34`** 的判定过程（与既有 `ATR_Movement` 读法冲突，已标注）。 |
 | [offsets/d3d12-vtable.md](offsets/d3d12-vtable.md) | `Present` = `vtable[8]` 与 `ExecuteCommandLists` = `vtable[10]` 的索引推导与自检。 |
 
 ### 逆向分析
@@ -84,7 +86,7 @@ src/payload/game/          游戏内存模型
   Offsets.h                ★ 全部原始偏移的唯一出处
   Field.h/.cpp             base+offset 读写原语、TArray 头
   ue/                      UE 运行时结构（NamePool / ObjectArray / Reflection / Engine / World）
-  dungeons2/               本游戏特有模型（Movement / Player / MovementResolver）
+  dungeons2/               本游戏特有模型（Movement / Player / MovementResolver / Currency）
 
 src/payload/feature/       功能模块框架
   module/                  模块基类与管理器；impl/ 放具体模块

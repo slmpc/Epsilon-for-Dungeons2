@@ -83,6 +83,7 @@ add_library(epsilonPayload SHARED
     src/payload/game/dungeons2/Player.cpp
     src/payload/game/dungeons2/Movement.cpp
     src/payload/game/dungeons2/MovementResolver.cpp
+    src/payload/game/dungeons2/Currency.cpp
     src/payload/feature/settings/Setting.cpp
     src/payload/feature/module/Module.cpp
     src/payload/feature/module/ModuleManager.cpp
@@ -91,6 +92,7 @@ add_library(epsilonPayload SHARED
     src/payload/feature/Modules.cpp
     src/payload/feature/module/impl/Jump.cpp
     src/payload/feature/module/impl/Speed.cpp
+    src/payload/feature/module/impl/Emerald.cpp
     src/payload/feature/ui/FeaturePanel.cpp
 )
 target_include_directories(epsilonPayload PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/payload")

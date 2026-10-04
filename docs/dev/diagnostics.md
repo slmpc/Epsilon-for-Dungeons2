@@ -34,6 +34,43 @@
 
 无参数时的完整流程与各开关见 [`../reverse/toolchain.md`](../reverse/toolchain.md)。
 
+---
+
+## ★ 构建：改了头文件但产物没变（静默失效）
+
+**症状**：改了 `Offsets.h` 里的常量，`.\scripts\build.ps1` 报成功，但注入进去发现
+**行为还是旧的**（日志里打出的还是旧 RVA）。DLL 时间戳更新了，内容却是旧的。
+
+**根因**：Ninja 靠 cl.exe 的 `/showIncludes` 输出来建头文件依赖图。前缀由 CMake 在
+配置期探测 cl.exe 的实际输出得到，写进 `build/<preset>/CMakeFiles/rules.ninja` 的
+`msvc_deps_prefix`。
+
+中文区域下 cl.exe 输出 **GBK**，而 CMake 按 **UTF-8** 解码，于是写进去的是双编码乱码：
+
+```
+msvc_deps_prefix = 娉ㄦ剰: 鍖呭惈鏂囦欢:          # 应为「注意: 包含文件: 」
+```
+
+Ninja 拿这串乱码去匹配 cl.exe 的 GBK 输出，**永远匹配不上** —— 头文件依赖**全部丢失**。
+后果不是报错，而是「构建成功、产物是旧的」。实测：`Offsets.h` 改于 17:35，
+而 `Engine.cpp.obj` 停在 17:11，构建照样通过。
+
+**修法**：`scripts/build.ps1` 在配置**之前**切换控制台代码页到 UTF-8：
+
+```powershell
+& chcp.com 65001 | Out-Null
+```
+
+这样配置期与构建期两侧 cl.exe 都输出 UTF-8，前缀能对上。
+
+⚠️ **`VSLANG=1033` 没用** —— 实测它不影响 `/showIncludes` 的输出语言。别指望它。
+
+**怎么确认修好了**：`build/<preset>/CMakeFiles/rules.ninja` 里那行应当是**可读的中文**
+而不是乱码；再 `touch` 一个头文件跑增量构建，对应的 `.obj` 时间戳应当变化。
+
+**已经踩过之后的补救**：`.\scripts\build.ps1 -Fresh`（删掉 preset 目录重新配置 + 全量编译）。
+判断当前产物是否可信，可以查 DLL 里是否含新常量 —— 直接按小端搜 4 字节立即数即可。
+
 ### 注入器找不到游戏时看什么
 
 | 症状 | 原因 | 做法 |

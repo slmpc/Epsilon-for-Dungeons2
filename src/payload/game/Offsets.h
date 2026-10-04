@@ -6,11 +6,12 @@ namespace epsilon::game::offsets {
 
 // ---------------------------------------------------------------- 引擎全局 (RVA)
 // 实测基线, 仅作快速路径; 失效时校验必然失败, 于是报告"未定位"。
+// 2026-10-04 游戏更新后重新实测(旧值整体失效, 见 docs/offsets/engine-globals.md)。
 namespace globals {
-inline constexpr uint32_t gObjects = 0x0BEA8BF0;
-inline constexpr uint32_t gNames   = 0x0BDC5040;
-inline constexpr uint32_t gEngine  = 0x0C03A1C0;
-inline constexpr uint32_t gWorld   = 0x0C037A80;
+inline constexpr uint32_t gObjects = 0x0BF35A70;
+inline constexpr uint32_t gNames   = 0x0BE51EC0;
+inline constexpr uint32_t gEngine  = 0x0C0C70B0;
+inline constexpr uint32_t gWorld   = 0x0C0C4970;
 } // namespace globals
 
 // ---------------------------------------------------------------- UObject
@@ -20,6 +21,11 @@ inline constexpr uint32_t internalIndex = 0x0C;
 inline constexpr uint32_t classPrivate  = 0x10;
 inline constexpr uint32_t namePrivate   = 0x18;
 inline constexpr uint32_t outerPrivate  = 0x20;
+
+// EObjectFlags::RF_ClassDefaultObject。类默认对象(CDO)带这一位。
+// 判定"这是不是 CDO"用它, 而不是看名字有没有 Default__ 前缀 ——
+// 名字可能解析不出来, 标志位不会。
+inline constexpr uint32_t classDefaultObjectFlag = 0x10;
 } // namespace object
 
 // ---------------------------------------------------------------- FUObjectArray / TUObjectArray
@@ -156,6 +162,31 @@ inline constexpr uint32_t blockDumpStart = 0x70;
 inline constexpr uint32_t blockDumpFloats = 80;
 } // namespace movementAttribute
 
+// ---------------------------------------------------------------- ATR_Currency 属性集
+// 绿宝石等货币的权威来源。属性是 GAS 的 FGameplayAttributeData:
+// 声明偏移处 8 字节是一个共享描述指针, 真正的 {BaseValue, CurrentValue} 在声明值 + 8。
+// 判定过程见 docs/offsets/currency.md(用 CDO 的 7 个属性槽与属性表一一对应敲定)。
+namespace currencyAttribute {
+inline constexpr uint32_t dataShift         = 0x08;   // 实测的数据位置 = 声明值 + 8
+inline constexpr uint32_t currentValueDelta = 0x04;   // FGameplayAttributeData::CurrentValue
+
+inline constexpr uint32_t emeralds                     = 0x90;   // CDO 默认 0
+inline constexpr uint32_t emeraldsMax                  = 0xA0;   // CDO 默认 0
+inline constexpr uint32_t emeraldsMin                  = 0xB0;   // CDO 默认 0
+inline constexpr uint32_t emeraldIncreasePercentage    = 0xC0;   // CDO 默认 0
+inline constexpr uint32_t emeraldDropChanceIncrease    = 0xD0;   // CDO 默认 0
+inline constexpr uint32_t maxAdditionalEmeralds        = 0xE0;   // CDO 默认 2.0
+inline constexpr uint32_t emeraldCapForDamageIncrease  = 0xF0;   // CDO 默认 0
+
+// 属性块诊断窗口(第一个属性起, 覆盖到最后一个)。
+inline constexpr uint32_t blockFirst = 0x80;
+inline constexpr uint32_t blockLast  = 0x120;
+inline constexpr uint32_t blockStep  = 0x10;
+} // namespace currencyAttribute
+
+// 承载货币的系统固有类名(精确匹配, 不是子串)。
+inline constexpr char currencyOwnerClass[] = "ATR_Currency";
+
 // ---------------------------------------------------------------- 取证扫描窗口
 // 只被只读诊断命令使用: 静态偏移失效时, 靠这些窗口把候选槽摊出来人工判定。
 namespace scan {
@@ -178,6 +209,11 @@ inline constexpr uint32_t levelBodyLast  = 0x300;
 // 移动组件上用于人工对照的 float 邻域窗口: 跳跃区 / 速度区 / 游戏自己的速度源区。
 inline constexpr uint32_t movementNeighbourhoodBases[] = {0x1A0, 0x22C, 0x1010};
 inline constexpr int      movementNeighbourhoodFloats = 8;
+
+// 货币持有者对象前 0x140 字节的槽位, 供诊断命令摊开判读。
+inline constexpr uint32_t currencyBodyFirst = 0x70;
+inline constexpr uint32_t currencyBodyLast  = 0x140;
+inline constexpr uint32_t currencyBodyStep  = 0x08;
 } // namespace scan
 
 } // namespace epsilon::game::offsets

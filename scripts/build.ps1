@@ -76,6 +76,24 @@ foreach ($line in $dump) {
 }
 Write-Host "[*] 已导入 $applied 个环境变量" -ForegroundColor Cyan
 
+# ---------------------------------------------------------------- 控制台代码页
+# ★ 必须在配置之前切成 UTF-8, 否则**头文件依赖会被静默丢掉**。
+#
+#   Ninja 靠 cl.exe 的 /showIncludes 输出来建头文件依赖图, 前缀由 CMake 在配置期
+#   探测 cl.exe 的实际输出得到, 写进 CMakeFiles\rules.ninja 的 msvc_deps_prefix。
+#   中文区域下 cl.exe 输出 GBK, CMake 却按 UTF-8 解码 —— 于是写进去的是双编码
+#   乱码(实测 `娉ㄦ剰: 鍖呭惈鏂囦欢:`), Ninja 拿它去匹配 cl.exe 的 GBK 输出永远
+#   匹配不上。
+#
+#   后果不是报错, 而是**构建"成功"但产物是旧的**: 只改 .h 的改动不会触发任何
+#   重编译。踩过一次 —— 改了 Offsets.h 里的四个引擎 RVA, DLL 里仍是旧值。
+#
+#   切到 UTF-8 代码页后 configure 与 build 两侧都是 UTF-8, 前缀能对上。
+#   注意 VSLANG=1033 对 /showIncludes **无效**(实测), 别指望它。
+& chcp.com 65001 | Out-Null
+$env:PYTHONIOENCODING = 'utf-8'
+Write-Host "[*] 代码页  : 65001 (UTF-8, 保证 Ninja 能解析 /showIncludes 前缀)" -ForegroundColor Cyan
+
 # 确认现在抓到的确实是 MSVC 而不是 clang
 $cl = (Get-Command cl.exe -ErrorAction SilentlyContinue).Source
 if (-not $cl) {

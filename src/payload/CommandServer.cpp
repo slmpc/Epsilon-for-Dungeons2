@@ -186,6 +186,7 @@ bool CommandServer::execute(std::string_view line) {
     }
     else if (cmd == "mv" || cmd == "movement") { cmdMovement(); }
     else if (cmd == "attrmv" || cmd == "attrs") { cmdAttributeMovement(); }
+    else if (cmd == "currency" || cmd == "emerald" || cmd == "em") { cmdCurrency(rest); }
     else if (cmd == "floats" || cmd == "f") {
         // floats <地址> [个数] —— 按 float 解读一段内存
         if (rest.empty()) { emitLine("用法: floats <地址> [个数]"); }
@@ -289,6 +290,11 @@ void CommandServer::printHelp() const {
     emitLine("  world                      当前 UWorld / PersistentLevel");
     emitLine("  actors [limit=N] [class=类名]");
     emitLine("                             枚举关卡里的 Actor");
+    emitLine("");
+    emitLine("  mv                         读玩家移动组件上的关键 float");
+    emitLine("  attrmv                     找 ATR_Movement 并打印属性块");
+    emitLine("  currency [class=子串] [limit=N]");
+    emitLine("                             货币持有者与 6 个字段; class= 时列候选类");
     emitLine("");
     emitLine("  quit                       结束命令循环");
 }
@@ -657,6 +663,131 @@ void CommandServer::dumpPointers(uint64_t addr, int count) {
             note = fmt("(小整数 {})", v);
         }
         emitFmt("  +{:#06x}  {:<18} {}", i * 8, hex(v, 16), note);
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  cmdCurrency — ATR_Currency 上绿宝石等货币属性
+//
+//  货币走 GAS: 每个属性在声明偏移处放一个共享描述指针, 真正的 {BaseValue, CurrentValue}
+//  在声明值 + 8。这里把整块属性区摊开, 便于偏移失效后重新判读。
+// ---------------------------------------------------------------------------
+void CommandServer::cmdCurrency(std::vector<std::string> const& args) {
+    namespace ca = epsilon::game::offsets::currencyAttribute;
+
+    if (auto cls = optValue(args, "class")) {
+        const int limit = static_cast<int>(optInt(args, "limit").value_or(16));
+        emitFmt("=== 类名含 {} 的对象(前 {} 个) ===", *cls, limit);
+        emitLine("   地址                类名                          名字");
+        emitLine("   " + std::string(78, '-'));
+        int shown = 0;
+        eng_.objects().for_each([&](ObjectStat const& st) {
+            if (!icontains(st.className, *cls)) return true;
+            if (shown >= limit) return false;
+            ++shown;
+            emitFmt("   {}  {:<28}  {}",
+                     hex(st.address, 16), sanitize(st.className, 28),
+                     sanitize(st.name, 32));
+            return true;
+        });
+        if (shown == 0) emitLine("   (没有命中)");
+        return;
+    }
+
+    auto& resolver = feature::currency();
+    resolver.resolve(eng_, true);
+
+    if (!resolver.ready()) {
+        emitFmt("未解析到货币属性集: {}", resolver.lastError());
+        emitLine("用 `currency class=ATR_` 看候选对象。");
+        return;
+    }
+
+    const d2::CurrencyAttributeSet set(resolver.set().address());
+    emitFmt("属性集      : {}  ({})", hex(set.address(), 16),
+             resolver.target().setName);
+    emitFmt("外层对象    : {}",
+             resolver.target().outerClass.empty() ? "(未匹配到玩家 pawn)"
+                                                  : resolver.target().outerClass);
+    emitFmt("形态通过    : {} 个 {}", resolver.candidates(),
+             epsilon::game::offsets::currencyOwnerClass);
+    emitLine("");
+    emitLine("   声明      数据         属性                            值");
+    emitLine("   " + std::string(72, '-'));
+    for (size_t i = 0; i < d2::currencyAttributeCount; ++i) {
+        const auto attribute = static_cast<d2::CurrencyAttribute>(i);
+        auto v = set.read(attribute);
+        emitFmt("   +{:#06x}  +{:#06x}    {:<30} {}",
+                 d2::declaredCurrencyOffset(attribute),
+                 d2::currencyDataOffset(attribute),
+                 std::string(d2::currencyAttributeName(attribute)),
+                 v ? fmt("{:.4f}", *v) : std::string("?"));
+    }
+
+    emitLine("");
+    emitFmt("=== 属性区原样({:#x}..{:#x}, 步长 {:#x}) ===", ca::blockFirst, ca::blockLast,
+             ca::blockStep);
+    for (uint32_t off = ca::blockFirst; off < ca::blockLast; off += ca::blockStep) {
+        auto base = set.readAt(off + ca::dataShift);
+        auto current = set.readAt(off + ca::dataShift + ca::currentValueDelta);
+        emitFmt("   +{:#06x}  base={}  current={}",
+                 off,
+                 base ? fmt("{:.4f}", *base) : std::string("?"),
+                 current ? fmt("{:.4f}", *current) : std::string("?"));
+    }
+
+    if (auto want = optValue(args, "find")) {
+        // 按数值反查: 在实例体内找 float / int32 等于给定值的槽。
+        // 偏移失效时用它把真值那格直接钉出来, 不必逐个属性猜。
+        double target = 0.0;
+        try { target = std::stod(*want); } catch (...) {
+            emitLine("find= 数值解析失败");
+            return;
+        }
+        emitFmt("=== 在 {} 上反查数值 {} ===", hex(set.address(), 16), target);
+        int hits = 0;
+        for (uint32_t off = 0x40; off < 0x400; off += 4) {
+            auto f = set.readAt(off);
+            auto i = epsilon::game::readI32(set.address(), off);
+            const bool asFloat = f && std::fabs(static_cast<double>(*f) - target) <=
+                                           std::fmax(0.01, std::fabs(target) * 1e-4);
+            const bool asInt = i && std::fabs(static_cast<double>(*i) - target) <= 0.5;
+            if (!asFloat && !asInt) continue;
+            ++hits;
+            emitFmt("   +{:#06x}  {}{}", off,
+                     f ? fmt("float={:.4f}", *f) : std::string("?"),
+                     asInt ? fmt("   int={}", *i) : std::string());
+        }
+        if (hits == 0) emitLine("   (没有命中 —— 这个实例里没有该数值)");
+        else emitFmt("   命中 {} 处", hits);
+    }
+
+    if (auto setVal = optValue(args, "set")) {
+        double want = 0.0;
+        try { want = std::stod(*setVal); } catch (...) {
+            emitLine("set= 数值解析失败");
+            return;
+        }
+        const auto attribute = d2::CurrencyAttribute::emeralds;
+        const auto before = set.read(attribute);
+        const bool ok = set.write(attribute, static_cast<float>(want));
+        const auto after = set.read(attribute);
+        emitFmt("写 Emeralds: {} -> {}  (write {})",
+                 before ? fmt("{:.3f}", *before) : std::string("?"),
+                 after ? fmt("{:.3f}", *after) : std::string("?"),
+                 ok ? "ok" : "FAILED");
+        emit("   采样: ");
+        int reverted = 0;
+        for (int i = 0; i < 8; ++i) {
+            ::Sleep(40);
+            auto now = set.read(attribute);
+            if (!now) { emit("?"); break; }
+            emit(fmt("{:.1f} ", *now));
+            if (std::fabs(*now - static_cast<float>(want)) > 0.01f) ++reverted;
+        }
+        emitLine("");
+        emitLine(reverted == 0 ? "   -> 保住了"
+                               : fmt("   -> 被改回 {}/8 次(GAS 会在聚合时重算)", reverted));
     }
 }
 

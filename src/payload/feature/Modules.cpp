@@ -2,6 +2,7 @@
 
 #include "payload/Payload.h"
 #include "payload/feature/module/ModuleManager.h"
+#include "payload/feature/module/impl/Emerald.h"
 #include "payload/feature/module/impl/Jump.h"
 #include "payload/feature/module/impl/Speed.h"
 
@@ -16,6 +17,7 @@ void initModules() {
     // ---- player ----
     mgr.add<JumpModule>();
     mgr.add<SpeedModule>();
+    mgr.add<EmeraldModule>();
 
     logInfo(fmt("[Feature] 已注册 {} 个功能模块", mgr.moduleCount()));
 }

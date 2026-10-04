@@ -1,5 +1,6 @@
 #pragma once
 
+#include "payload/game/dungeons2/Currency.h"
 #include "payload/game/dungeons2/MovementResolver.h"
 #include "payload/game/ue/Engine.h"
 
@@ -34,5 +35,8 @@ void tickFrame();
 
 // 进程内唯一的移动解析器。
 [[nodiscard]] game::dungeons2::MovementResolver& movement();
+
+// 进程内唯一的货币持有者解析器。
+[[nodiscard]] game::dungeons2::CurrencyResolver& currency();
 
 } // namespace epsilon::feature

@@ -36,6 +36,7 @@ src/payload/game/
 | [world.md](world.md) | `UWorld` / `ULevel` / `TArray` / `FString` | `offsets::world`, `offsets::level`, `offsets::array`, `offsets::stringData`, `ue::WorldView` |
 | [character-movement.md](character-movement.md) | `UCharacterMovementComponent` 的 13 个 float 字段 | `offsets::characterMovement`, `dungeons2::MovementComponent` |
 | [movement-attributes.md](movement-attributes.md) | GAS 属性集 `ATR_Movement` 的 12 个属性 | `offsets::movementAttribute`, `dungeons2::MovementAttributeSet` |
+| [currency.md](currency.md) | GAS 属性集 `ATR_Currency` 的 7 个货币属性；**属性表里 `Offset_Internal` 在记录 `+0x34`** 的判定过程 | `offsets::currencyAttribute`, `dungeons2::CurrencyAttributeSet` |
 | [d3d12-vtable.md](d3d12-vtable.md) | `Present` / `ExecuteCommandLists` 的 COM vtable 索引 | `offsets::d3d12` |
 
 ## 偏移的两种来源
@@ -56,8 +57,20 @@ UE 的 UHT 会为每个类的属性生成一份参数表（`FPropertyParams`）�
 
 | 属性表 | 区段 | 偏移字段位置 |
 |---|---|---|
+| `ATR_Movement` | `0x14a0d68xx` | 记录 `+0x34`（名字在记录 `+0x00`） |
+| `ATR_Currency` | `0x14a0d00xx` | 记录 `+0x34`（同左） |
 | `UCharacterMovementComponent` | `0x14973xxxx` | `+0x2c` |
-| `ATR_Movement` | `0x14a069800` | `+0x24` |
+
+**「记录 `+0x34`」的判定依据**（用 CDO 上的真实浮点值当标尺）：`ATR_Movement` 的记录
+`MovementSpeed` 在 `+0x34` 读出 `0x90`，而 CDO 上 `0x98` 的值是 **700.0** —— 速度量级；
+`MovementSpeedMultiplier` 随之落在 `0xA0`，CDO 值是 **1.0** —— 倍率量级。
+另一种读法（名字槽 `−0x0C`）会把 `MovementSpeed` 算到 `0x00`（对象首字节，不可能）。
+完整对照见 [currency.md](currency.md)。
+
+> ℹ️ **`ATR_Movement` 的名字与偏移是按另一种读法配的**（`名字槽 − 0x0C`），
+> 按上面这条规则它的名字会整体后移一条（`0x90` 那个槽其实是 `MovementSpeed`）。
+> 但**物理槽位没变** —— 实测「写 `+0x98` 让移动变快」用的就是同一格，
+> 所以 `Speed` 模块与 `Offsets.h` 里的常数**保持原样**，只把这条差异记在这里。
 
 **2. 运行时反射（`ue::Reflection`）**
 

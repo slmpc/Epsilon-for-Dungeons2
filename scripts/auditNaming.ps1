@@ -72,6 +72,8 @@ $allowed = @(
     # 目标游戏自己的类型名与蓝图类名(第三方命名, 必须保持原拼写)
     '^ATR_',              # ATR_Movement 等 GAS 属性集
     '^BP_',               # BP_AlexCharacter_C 等蓝图生成类
+    # Oodle SDK 的导出名(第三方, 保持原拼写)
+    '^Oodle',             # OodleLZ_Decompress / OodleLZ_Compress / OodleCore_Plugins_...
     # STL 成员名(第三方)
     '^emplace_back$',
     # nlohmann 的 optional 访问器 / Win32 标志
